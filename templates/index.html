@@ -1,0 +1,97 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Claude Triage</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body>
+  <div class="app">
+    <aside class="sidebar">
+      <div class="brand">Claude Triage</div>
+
+      <div class="key-box">
+        <label for="apiKeyInput">Claude API key</label>
+        <input id="apiKeyInput" type="password" placeholder="sk-ant-..." autocomplete="off">
+        <div class="key-actions">
+          <button id="saveKeyBtn" class="btn btn-primary btn-sm">Save key</button>
+          <button id="clearKeyBtn" class="btn btn-ghost btn-sm">Clear</button>
+        </div>
+        <div id="keyStatus" class="key-status">Checking...</div>
+        <div class="key-note">Kept in server memory for this browser session only. Never saved to disk.</div>
+      </div>
+
+      <button id="newSessionBtn" class="btn btn-primary btn-block">+ New session</button>
+
+      <div class="session-list" id="sessionList"></div>
+    </aside>
+
+    <main class="main">
+      <div id="noSession" class="empty-state">
+        <h2>No session selected</h2>
+        <p>Create a new session or pick one from the sidebar to get started.</p>
+      </div>
+
+      <div id="sessionView" class="session-view" hidden>
+        <header class="session-header">
+          <h2 id="sessionTitle"></h2>
+          <span id="sessionMeta" class="muted"></span>
+        </header>
+
+        <section class="panel">
+          <h3>1. Upload spreadsheets</h3>
+          <div class="upload-row">
+            <label class="btn btn-secondary">
+              Choose files
+              <input type="file" id="fileInput" accept=".xlsx" multiple hidden>
+            </label>
+            <label class="btn btn-secondary">
+              Choose folder
+              <input type="file" id="folderInput" webkitdirectory directory multiple hidden>
+            </label>
+            <span id="uploadStatus" class="muted"></span>
+          </div>
+          <div id="dropZone" class="drop-zone">Drag &amp; drop .xlsx files or a folder here</div>
+          <ul id="uploadList" class="upload-list"></ul>
+        </section>
+
+        <section class="panel">
+          <h3>2. Analyze &amp; triage</h3>
+          <textarea id="extraInstructions" placeholder="Optional: extra instructions for this analysis run (e.g. focus on the NG / Netherlands positions)..."></textarea>
+          <button id="analyzeBtn" class="btn btn-primary">Analyze with Claude</button>
+          <div id="analyzeStatus" class="muted"></div>
+        </section>
+
+        <section class="panel">
+          <h3>Session context</h3>
+          <div id="conversation" class="conversation"></div>
+        </section>
+
+        <section class="panel">
+          <h3>Reports</h3>
+          <ul id="reportList" class="report-list"></ul>
+        </section>
+      </div>
+    </main>
+  </div>
+
+  <div id="newSessionModal" class="modal" hidden>
+    <div class="modal-card">
+      <h3>New session</h3>
+      <label for="newSessionTitle">Title</label>
+      <input id="newSessionTitle" type="text" placeholder="e.g. Q3 NG reconciliation breaks">
+      <label for="carrySelect">Carry context from a previous session (optional)</label>
+      <select id="carrySelect">
+        <option value="">None</option>
+      </select>
+      <div class="modal-actions">
+        <button id="createSessionBtn" class="btn btn-primary">Create</button>
+        <button id="cancelSessionBtn" class="btn btn-ghost">Cancel</button>
+      </div>
+    </div>
+  </div>
+
+  <script src="{{ url_for('static', filename='app.js') }}"></script>
+</body>
+</html>
