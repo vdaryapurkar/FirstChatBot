@@ -62,7 +62,7 @@ def _build_summary_sheet(wb, triage, analysis, sources):
     ws = wb.create_sheet("Summary")
     ws.sheet_view.showGridLines = False
 
-    ws["A1"] = "Claude Triage Analysis - Summary"
+    ws["A1"] = "Recon-Ci Triage Analysis - Summary"
     ws["A1"].font = TITLE_FONT
     ws["A2"] = f"Generated {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')}  |  Sources: {', '.join(sources)}"
     ws["A2"].font = SUBTITLE_FONT
