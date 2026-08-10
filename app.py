@@ -22,7 +22,9 @@ from flask import Flask, jsonify, request, send_file, session, render_template
 
 from core import db, keys, xlsx_ingest, report_builder
 from core.claude_client import ClaudeAnalysisError, run_analysis
-from config.rules import MAX_SAMPLE_ROWS_PER_SHEET
+from config.rules import MAX_SAMPLE_ROWS_PER_SHEET, AVAILABLE_MODELS
+
+AVAILABLE_MODEL_IDS = {m["id"] for m in AVAILABLE_MODELS}
 
 BASE_DIR = Path(__file__).resolve().parent
 UPLOAD_DIR = BASE_DIR / "data" / "uploads"
@@ -51,15 +53,29 @@ def index():
 def set_key():
     data = request.get_json(silent=True) or {}
     api_key = (data.get("api_key") or "").strip()
-    if not api_key:
-        return jsonify({"error": "api_key is required"}), 400
-    keys.set_key(_browser_id(), api_key)
+    model = (data.get("model") or "").strip()
+
+    if not api_key and not model:
+        return jsonify({"error": "api_key or model is required"}), 400
+    if model and model not in AVAILABLE_MODEL_IDS:
+        return jsonify({"error": f"Unknown model '{model}'. Choose one of: {sorted(AVAILABLE_MODEL_IDS)}"}), 400
+
+    browser_id = _browser_id()
+    if api_key:
+        keys.set_key(browser_id, api_key)
+    if model:
+        keys.set_model(browser_id, model)
     return jsonify({"status": "ok"})
 
 
 @app.route("/api/key/status")
 def key_status():
-    return jsonify({"has_key": keys.has_key(_browser_id())})
+    browser_id = _browser_id()
+    return jsonify({
+        "has_key": keys.has_key(browser_id),
+        "model": keys.get_model(browser_id),
+        "available_models": AVAILABLE_MODELS,
+    })
 
 
 @app.route("/api/key", methods=["DELETE"])
@@ -192,9 +208,10 @@ def analyze(session_id):
         xlsx_ingest.build_data_digest(tables, triage, MAX_SAMPLE_ROWS_PER_SHEET)
     )
 
+    model = keys.get_model(_browser_id())
     history = db.get_messages(session_id)
     try:
-        outcome = run_analysis(api_key, history, digest, extra_instructions)
+        outcome = run_analysis(api_key, history, digest, extra_instructions, model=model)
     except ClaudeAnalysisError as e:
         return jsonify({"error": str(e)}), 502
 
@@ -208,7 +225,8 @@ def analyze(session_id):
     report_path = session_report_dir / report_filename
 
     sources = sorted({u["original_name"] for u in uploads})
-    report_builder.build_report(triage, result, sources, str(report_path))
+    report_builder.build_report(triage, result, sources, str(report_path),
+                                 process_types_by_file=digest.get("process_types_by_file"))
 
     report_id = db.add_report(session_id, str(report_path), result.get("summary", ""))
 

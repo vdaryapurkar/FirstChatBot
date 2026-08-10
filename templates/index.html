@@ -14,12 +14,14 @@
       <div class="key-box">
         <label for="apiKeyInput">Claude API key</label>
         <input id="apiKeyInput" type="password" placeholder="sk-ant-..." autocomplete="off">
+        <label for="modelSelect">Model</label>
+        <select id="modelSelect"></select>
         <div class="key-actions">
-          <button id="saveKeyBtn" class="btn btn-primary btn-sm">Save key</button>
-          <button id="clearKeyBtn" class="btn btn-ghost btn-sm">Clear</button>
+          <button id="saveKeyBtn" class="btn btn-primary btn-sm">Save</button>
+          <button id="clearKeyBtn" class="btn btn-ghost btn-sm">Clear key</button>
         </div>
         <div id="keyStatus" class="key-status">Checking...</div>
-        <div class="key-note">Kept in server memory for this browser session only. Never saved to disk.</div>
+        <div class="key-note">Key is kept in server memory for this browser session only, never saved to disk. Model choice is remembered alongside it.</div>
       </div>
 
       <button id="newSessionBtn" class="btn btn-primary btn-block">+ New session</button>

@@ -15,6 +15,16 @@ as a working example. Replace it with your own domain rules.
 
 MODEL_NAME = "claude-sonnet-5"
 
+# Models selectable in the UI. The user can pick one per browser session
+# (see core/keys.py); MODEL_NAME above is the default if none is picked.
+# label: shown in the UI dropdown. id: the exact Claude API model string.
+AVAILABLE_MODELS = [
+    {"id": "claude-opus-5", "label": "Opus 5 (most capable)"},
+    {"id": "claude-sonnet-5", "label": "Sonnet 5 (balanced, default)"},
+    {"id": "claude-haiku-4-5", "label": "Haiku 4.5 (fastest, cheapest)"},
+    {"id": "claude-fable-5", "label": "Fable 5 (highest capability, highest cost)"},
+]
+
 # Hard cap on how many data rows (per uploaded sheet) get sent to Claude in
 # the prompt, to keep requests within a reasonable token budget. The full
 # deterministic comparison/triage math is always computed in Python over the
@@ -29,6 +39,25 @@ val-detail reconciliation exports), along with deterministic comparison
 statistics that were already computed in Python (row counts, True/False
 splits for mismatch flag columns, numeric pre/post differences). Do not
 recompute or contradict those numbers -- treat them as ground truth.
+
+Process types: every uploaded file's results belong to exactly one of four
+reconciliation processes, already classified in Python and provided to you
+as "process_type" per file/sheet and per row (do not reclassify -- treat it
+as ground truth):
+
+- Settlement: filename contains "findetail" AND the file has the debit/
+  credit columns (pre_debitsum, post_debitsum, debit_mismatch,
+  pre_creditsum, post_creditsum, credit_mismatch).
+- Valuation: filename contains "valdetail".
+- NetValuation: filename contains "netval".
+- Credit: filename contains "credit".
+- Unknown: none of the above matched.
+
+When multiple files/process types are uploaded together, call out per-
+process-type findings separately in your summary and root causes rather
+than blending them -- a root cause identified in a Settlement file should
+not be assumed to explain a break in a Valuation file unless the evidence
+actually supports that.
 
 Your job:
 

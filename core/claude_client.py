@@ -34,6 +34,11 @@ ANALYSIS_TOOL = {
                         "description": {"type": "string"},
                         "true_count": {"type": "integer"},
                         "false_count": {"type": "integer"},
+                        "process_types": {
+                            "type": "array",
+                            "items": {"type": "string", "enum": ["Settlement", "Valuation", "NetValuation", "Credit", "Unknown"]},
+                            "description": "Which process type(s) this mismatch column was observed in.",
+                        },
                         "correlated_with": {
                             "type": "array",
                             "items": {"type": "string"},
@@ -49,6 +54,7 @@ ANALYSIS_TOOL = {
                     "type": "object",
                     "properties": {
                         "issue": {"type": "string"},
+                        "process_type": {"type": "string", "enum": ["Settlement", "Valuation", "NetValuation", "Credit", "Unknown"]},
                         "explanation": {"type": "string"},
                         "evidence": {"type": "array", "items": {"type": "string"}},
                         "affected_scope": {"type": "string"},
@@ -82,9 +88,11 @@ def run_analysis(
     conversation_history: list[dict],
     digest: dict,
     extra_instructions: str | None = None,
+    model: str | None = None,
 ) -> dict:
     """conversation_history: prior messages for this session (role/content),
     already stored in order. digest: output of xlsx_ingest.build_data_digest.
+    model: Claude model ID to use for this call; defaults to config.rules.MODEL_NAME.
     Returns the parsed tool-call input dict."""
 
     if not api_key or not api_key.strip():
@@ -106,7 +114,7 @@ def run_analysis(
     client = anthropic.Anthropic(api_key=api_key)
     try:
         response = client.messages.create(
-            model=MODEL_NAME,
+            model=model or MODEL_NAME,
             max_tokens=4096,
             system=ANALYSIS_SYSTEM_PROMPT,
             messages=messages,

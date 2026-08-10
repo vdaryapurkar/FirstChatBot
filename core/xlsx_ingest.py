@@ -17,6 +17,40 @@ import pandas as pd
 
 MISMATCH_SUFFIX = "_mismatch"
 
+# Process-type classification rules. Every uploaded workbook is the result of
+# one of four reconciliation processes, identified from its filename and
+# (for Settlement) its columns. See detect_process_type() below and
+# config/rules.py for how this is explained to Claude.
+SETTLEMENT_COLUMNS = {
+    "pre_debitsum", "post_debitsum", "debit_mismatch",
+    "pre_creditsum", "post_creditsum", "credit_mismatch",
+}
+PROCESS_TYPES = ("Settlement", "Valuation", "NetValuation", "Credit")
+
+
+def detect_process_type(filename: str, columns: list[str]) -> str:
+    """Classify which of the four reconciliation processes a file's data
+    belongs to, purely from its filename and column names:
+
+    - "findetail" in filename AND the debit/credit sum + mismatch columns
+      are present -> Settlement
+    - "valdetail" in filename -> Valuation
+    - "netval" in filename -> NetValuation
+    - "credit" in filename -> Credit
+    - otherwise -> "Unknown"
+    """
+    name = filename.lower()
+    cols = {str(c).lower() for c in columns}
+    if "findetail" in name and SETTLEMENT_COLUMNS.issubset(cols):
+        return "Settlement"
+    if "valdetail" in name:
+        return "Valuation"
+    if "netval" in name:
+        return "NetValuation"
+    if "credit" in name:
+        return "Credit"
+    return "Unknown"
+
 
 def read_workbook(path: str | Path) -> dict[str, pd.DataFrame]:
     """Read every sheet of an xlsx file into a dict of {sheet_name: DataFrame}."""
@@ -25,7 +59,7 @@ def read_workbook(path: str | Path) -> dict[str, pd.DataFrame]:
 
 def ingest_files(file_paths: list[tuple[str, str]]) -> list[dict]:
     """file_paths: list of (original_name, stored_path). Returns a flat list of
-    {source_file, sheet_name, df} for every sheet in every file."""
+    {source_file, sheet_name, df, process_type} for every sheet in every file."""
     tables = []
     for original_name, stored_path in file_paths:
         sheets = read_workbook(stored_path)
@@ -33,7 +67,13 @@ def ingest_files(file_paths: list[tuple[str, str]]) -> list[dict]:
             if df.empty:
                 continue
             df = df.dropna(how="all")
-            tables.append({"source_file": original_name, "sheet_name": sheet_name, "df": df})
+            process_type = detect_process_type(original_name, [str(c) for c in df.columns])
+            tables.append({
+                "source_file": original_name,
+                "sheet_name": sheet_name,
+                "df": df,
+                "process_type": process_type,
+            })
     return tables
 
 
@@ -88,6 +128,7 @@ def compute_triage(tables: list[dict]) -> dict[str, dict]:
 
     for t in tables:
         df, source_file, sheet_name = t["df"], t["source_file"], t["sheet_name"]
+        process_type = t.get("process_type", "Unknown")
         columns = [str(c) for c in df.columns]
         for col in mismatch_cols:
             if col not in df.columns:
@@ -103,6 +144,7 @@ def compute_triage(tables: list[dict]) -> dict[str, dict]:
                 record = row.to_dict()
                 record["_source_file"] = source_file
                 record["_sheet_name"] = sheet_name
+                record["_process_type"] = process_type
                 if pre_col and post_col:
                     try:
                         pre_v = float(row[pre_col])
@@ -139,7 +181,9 @@ def build_data_digest(tables: list[dict], triage: dict[str, dict], max_sample_ro
     prompt. Every number in here is exact (computed over the full dataset);
     only the row-level samples are capped."""
     files = sorted({t["source_file"] for t in tables})
+    process_types_by_file = {t["source_file"]: t.get("process_type", "Unknown") for t in tables}
     sheets = [{"source_file": t["source_file"], "sheet_name": t["sheet_name"],
+               "process_type": t.get("process_type", "Unknown"),
                "rows": len(t["df"]), "columns": [str(c) for c in t["df"].columns]}
               for t in tables]
 
@@ -160,6 +204,7 @@ def build_data_digest(tables: list[dict], triage: dict[str, dict], max_sample_ro
 
     return {
         "files": files,
+        "process_types_by_file": process_types_by_file,
         "sheets": sheets,
         "issues": issues,
     }

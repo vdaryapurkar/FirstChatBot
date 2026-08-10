@@ -40,17 +40,20 @@ def _autosize(ws, widths: list[int]):
         ws.column_dimensions[get_column_letter(i)].width = w
 
 
-def build_report(triage: dict[str, dict], analysis: dict, sources: list[str], output_path: str):
+def build_report(triage: dict[str, dict], analysis: dict, sources: list[str], output_path: str,
+                  process_types_by_file: dict[str, str] | None = None):
     """triage: the FULL, uncapped output of xlsx_ingest.compute_triage (every
     row, not the token-budget-limited sample that was sent to Claude).
     analysis: the parsed tool-call dict from claude_client.run_analysis (the
     'result' key: summary/triage_categories/root_causes/recommendations).
     sources: list of original uploaded file names included in this report.
+    process_types_by_file: {source_file: "Valuation"|"Settlement"|"NetValuation"|"Credit"|"Unknown"},
+    from xlsx_ingest.build_data_digest()'s "process_types_by_file".
     """
     wb = openpyxl.Workbook()
     wb.remove(wb.active)
 
-    _build_summary_sheet(wb, triage, analysis, sources)
+    _build_summary_sheet(wb, triage, analysis, sources, process_types_by_file or {})
     _build_root_cause_sheet(wb, analysis)
     for col, issue in triage.items():
         _build_issue_sheet(wb, col, issue)
@@ -58,7 +61,7 @@ def build_report(triage: dict[str, dict], analysis: dict, sources: list[str], ou
     wb.save(output_path)
 
 
-def _build_summary_sheet(wb, triage, analysis, sources):
+def _build_summary_sheet(wb, triage, analysis, sources, process_types_by_file):
     ws = wb.create_sheet("Summary")
     ws.sheet_view.showGridLines = False
 
@@ -67,16 +70,30 @@ def _build_summary_sheet(wb, triage, analysis, sources):
     ws["A2"] = f"Generated {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')}  |  Sources: {', '.join(sources)}"
     ws["A2"].font = SUBTITLE_FONT
 
-    ws["A4"] = "Executive Summary"
-    ws["A4"].font = BOLD_BODY_FONT
-    ws.merge_cells("A5:F9")
-    cell = ws["A5"]
+    src_header_row = 4
+    ws.cell(row=src_header_row, column=1, value="Source file")
+    ws.cell(row=src_header_row, column=2, value="Process type")
+    _style_header_row(ws, src_header_row, 2)
+    r = src_header_row + 1
+    for src in sources:
+        ws.cell(row=r, column=1, value=src).font = BODY_FONT
+        ws.cell(row=r, column=2, value=process_types_by_file.get(src, "Unknown")).font = BODY_FONT
+        for j in (1, 2):
+            ws.cell(row=r, column=j).border = BORDER
+        r += 1
+
+    summary_label_row = r + 1
+    ws.cell(row=summary_label_row, column=1, value="Executive Summary").font = BOLD_BODY_FONT
+    summary_start = summary_label_row + 1
+    summary_end = summary_start + 4
+    ws.merge_cells(start_row=summary_start, start_column=1, end_row=summary_end, end_column=6)
+    cell = ws.cell(row=summary_start, column=1)
     cell.value = analysis.get("summary", "")
     cell.font = BODY_FONT
     cell.alignment = WRAP
 
     headers = ["Issue (column)", "TRUE (issue present)", "FALSE (no issue)", "Total", "Description"]
-    header_row = 11
+    header_row = summary_end + 2
     for j, h in enumerate(headers, start=1):
         ws.cell(row=header_row, column=j, value=h)
     _style_header_row(ws, header_row, len(headers))
@@ -111,7 +128,7 @@ def _build_root_cause_sheet(wb, analysis):
     ws["A1"] = "Root Cause Analysis"
     ws["A1"].font = TITLE_FONT
 
-    headers = ["Issue", "Explanation", "Evidence", "Affected Scope", "Confidence"]
+    headers = ["Issue", "Process Type", "Explanation", "Evidence", "Affected Scope", "Confidence"]
     header_row = 3
     for j, h in enumerate(headers, start=1):
         ws.cell(row=header_row, column=j, value=h)
@@ -122,6 +139,7 @@ def _build_root_cause_sheet(wb, analysis):
         evidence = "\n".join(f"- {e}" for e in rc.get("evidence", []))
         row_vals = [
             rc.get("issue", ""),
+            rc.get("process_type", ""),
             rc.get("explanation", ""),
             evidence,
             rc.get("affected_scope", ""),
@@ -140,11 +158,11 @@ def _build_root_cause_sheet(wb, analysis):
     r += 1
     for rec in analysis.get("recommendations", []):
         ws.cell(row=r, column=1, value=f"- {rec}").font = BODY_FONT
-        ws.merge_cells(start_row=r, start_column=1, end_row=r, end_column=5)
+        ws.merge_cells(start_row=r, start_column=1, end_row=r, end_column=6)
         ws.cell(row=r, column=1).alignment = WRAP
         r += 1
 
-    _autosize(ws, [28, 45, 40, 22, 12])
+    _autosize(ws, [28, 16, 45, 40, 22, 12])
 
 
 def _build_issue_sheet(wb, col: str, issue: dict):
@@ -167,7 +185,7 @@ def _build_issue_sheet(wb, col: str, issue: dict):
     seen = set()
     for row in (true_rows + false_rows):
         for k in row.keys():
-            if k in (col, pre_col, post_col, "_source_file", "_sheet_name", "_difference"):
+            if k in (col, pre_col, post_col, "_source_file", "_sheet_name", "_process_type", "_difference"):
                 continue
             if k.startswith("pre_") or k.startswith("post_") or k.lower().endswith("_mismatch"):
                 continue
@@ -175,7 +193,7 @@ def _build_issue_sheet(wb, col: str, issue: dict):
                 seen.add(k)
                 id_cols.append(k)
 
-    headers = ["source_file", "sheet_name"] + id_cols
+    headers = ["source_file", "sheet_name", "process_type"] + id_cols
     if pre_col:
         headers += [pre_col, post_col, "difference (post - pre)"]
     headers += [col]
@@ -195,7 +213,7 @@ def _build_issue_sheet(wb, col: str, issue: dict):
         ws.cell(row=r, column=1).fill = GROUP_FILL
         r += 1
         for row in group_rows:
-            values = [row.get("_source_file", ""), row.get("_sheet_name", "")]
+            values = [row.get("_source_file", ""), row.get("_sheet_name", ""), row.get("_process_type", "Unknown")]
             values += [row.get(k, "") for k in id_cols]
             pre_idx = post_idx = diff_idx = None
             if pre_col:
@@ -218,4 +236,4 @@ def _build_issue_sheet(wb, col: str, issue: dict):
                 c.number_format = "0.0000"
             r += 1
 
-    _autosize(ws, [16, 14] + [14] * len(id_cols) + ([16, 16, 16] if pre_col else []) + [10])
+    _autosize(ws, [16, 14, 14] + [14] * len(id_cols) + ([16, 16, 16] if pre_col else []) + [10])

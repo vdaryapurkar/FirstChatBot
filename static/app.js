@@ -18,18 +18,32 @@ async function api(path, opts = {}) {
 // ---------------------------------------------------------------- API key --
 
 async function refreshKeyStatus() {
-  const { has_key } = await api("/api/key/status");
+  const { has_key, model, available_models } = await api("/api/key/status");
+
+  const select = document.getElementById("modelSelect");
+  if (!select.dataset.populated) {
+    select.innerHTML = "";
+    for (const m of available_models) {
+      const opt = document.createElement("option");
+      opt.value = m.id;
+      opt.textContent = m.label;
+      select.appendChild(opt);
+    }
+    select.dataset.populated = "true";
+  }
+  select.value = model;
+
   const el = document.getElementById("keyStatus");
-  el.textContent = has_key ? "Key set for this session." : "No key set.";
+  el.textContent = (has_key ? "Key set for this session." : "No key set.") + ` Model: ${model}`;
   el.className = "key-status " + (has_key ? "ok" : "missing");
 }
 
 document.getElementById("saveKeyBtn").addEventListener("click", async () => {
   const input = document.getElementById("apiKeyInput");
   const api_key = input.value.trim();
-  if (!api_key) return;
+  const model = document.getElementById("modelSelect").value;
   try {
-    await api("/api/key", { method: "POST", body: JSON.stringify({ api_key }) });
+    await api("/api/key", { method: "POST", body: JSON.stringify({ api_key, model }) });
     input.value = "";
     await refreshKeyStatus();
   } catch (e) {
