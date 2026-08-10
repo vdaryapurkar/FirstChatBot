@@ -61,6 +61,31 @@ Then open http://localhost:5000 and configure a provider in the sidebar:
   with a forced `tool_choice` for structured output to work -- most modern
   local-serving stacks (recent Ollama, vLLM, LM Studio) do.
 
+### Connecting through an internal AI gateway (e.g. a LiteLLM proxy)
+
+Some organizations front Claude behind an internal gateway that speaks the
+OpenAI `/chat/completions` API rather than the native Anthropic API (a
+common LiteLLM proxy setup) -- `model` is still a Claude model name like
+`claude-haiku-4-5`, but the wire format and client are OpenAI's. That's
+exactly what the **Open-source/OpenAI-compatible** provider above talks to,
+so no code changes are needed -- just point it at the gateway:
+
+1. `cp .env.example .env`
+2. Fill in the three values from your gateway dashboard:
+   ```
+   AI_API_KEY=<key from the gateway dashboard>
+   AI_GATEWAY_ENDPOINT=<gateway base URL, e.g. https://ai-gateway-litellm.your-org.example>
+   AI_GATEWAY_MODEL=claude-haiku-4-5
+   ```
+3. `pip install -r requirements.txt` (pulls in `python-dotenv`, already listed)
+4. `python app.py`
+
+Every new browser session now defaults to the Open-source/OpenAI-compatible
+provider pre-filled with the gateway's URL/model/key (see `core/keys.py` --
+`.env` is gitignored, so the real key never gets committed). The sidebar
+still lets you override any of it per session, or switch back to the plain
+Claude provider.
+
 ## Configuring the triage rules
 
 Edit [`config/rules.py`](config/rules.py):

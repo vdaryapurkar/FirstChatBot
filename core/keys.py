@@ -4,15 +4,26 @@ non-Claude providers) the server's base URL.
 
 Kept in server process memory only -- never written to the SQLite database,
 a file, or logs. Restarting the app clears everything and each browser
-session must re-configure. This trades convenience for not persisting a
-secret to disk inside a repo-adjacent app. The provider/model/base_url
-carry no secrecy requirement but are stored the same way for simplicity --
-they reset on restart too, which is fine since they're just a UI
-preference, unlike the API key.
+session must re-configure (or picks up the .env defaults again -- see
+below). This trades convenience for not persisting a secret to disk inside
+a repo-adjacent app. The provider/model/base_url carry no secrecy
+requirement but are stored the same way for simplicity -- they reset on
+restart too, which is fine since they're just a UI preference, unlike the
+API key.
+
+Gateway defaults: if AI_API_KEY and AI_GATEWAY_ENDPOINT are both set (e.g.
+via a .env file -- see .env.example), every new browser session defaults to
+the "openai_compatible" provider pointed at that gateway instead of empty
+Claude fields. This is for internal AI gateways (e.g. a LiteLLM proxy) that
+front Claude models behind an OpenAI-compatible /chat/completions API --
+point base_url at the gateway and it's indistinguishable from any other
+OpenAI-compatible server as far as this app is concerned. The UI can still
+override any of it per session.
 """
 
 from __future__ import annotations
 
+import os
 import threading
 
 from config.rules import MODEL_NAME
@@ -26,6 +37,15 @@ _settings: dict[str, dict] = {}
 
 
 def _defaults() -> dict:
+    gateway_key = os.environ.get("AI_API_KEY", "").strip()
+    gateway_url = os.environ.get("AI_GATEWAY_ENDPOINT", "").strip()
+    if gateway_key and gateway_url:
+        return {
+            "api_key": gateway_key,
+            "provider": PROVIDER_OPENAI_COMPATIBLE,
+            "model": os.environ.get("AI_GATEWAY_MODEL", "").strip() or "claude-haiku-4-5",
+            "base_url": gateway_url,
+        }
     return {
         "api_key": None,
         "provider": PROVIDER_ANTHROPIC,

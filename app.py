@@ -14,6 +14,13 @@ database. Switch providers any time; session context carries over either way.
 
 Edit config/rules.py to change the triage rules / system prompt sent to
 whichever model is active.
+
+Connecting through an internal AI gateway (e.g. a LiteLLM proxy that fronts
+Claude behind an OpenAI-compatible API): copy .env.example to .env, fill in
+AI_API_KEY / AI_GATEWAY_ENDPOINT / AI_GATEWAY_MODEL, and every new browser
+session will default to that gateway automatically (still overridable in
+the sidebar). .env is gitignored -- never commit real credentials into
+config/rules.py or any other tracked file.
 """
 
 from __future__ import annotations
@@ -23,7 +30,10 @@ import os
 import uuid
 from pathlib import Path
 
+from dotenv import load_dotenv
 from flask import Flask, jsonify, request, send_file, session, render_template
+
+load_dotenv()
 
 from core import claude_client, db, keys, openai_client, xlsx_ingest, report_builder
 from core.llm_errors import LLMAnalysisError
