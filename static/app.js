@@ -17,34 +17,77 @@ async function api(path, opts = {}) {
 
 // ---------------------------------------------------------------- API key --
 
-async function refreshKeyStatus() {
-  const { has_key, model, available_models } = await api("/api/key/status");
+function applyProviderVisibility(provider) {
+  document.getElementById("anthropicFields").hidden = provider !== "anthropic";
+  document.getElementById("openaiFields").hidden = provider !== "openai_compatible";
+}
 
-  const select = document.getElementById("modelSelect");
-  if (!select.dataset.populated) {
-    select.innerHTML = "";
+document.getElementById("providerSelect").addEventListener("change", (e) => {
+  applyProviderVisibility(e.target.value);
+});
+
+async function refreshKeyStatus() {
+  const { has_key, provider, model, base_url, available_models } = await api("/api/key/status");
+
+  const modelSelect = document.getElementById("modelSelect");
+  if (!modelSelect.dataset.populated) {
+    modelSelect.innerHTML = "";
     for (const m of available_models) {
       const opt = document.createElement("option");
       opt.value = m.id;
       opt.textContent = m.label;
-      select.appendChild(opt);
+      modelSelect.appendChild(opt);
     }
-    select.dataset.populated = "true";
+    modelSelect.dataset.populated = "true";
   }
-  select.value = model;
+
+  document.getElementById("providerSelect").value = provider;
+  applyProviderVisibility(provider);
+
+  if (provider === "anthropic") {
+    modelSelect.value = model;
+  } else {
+    document.getElementById("customModelInput").value = model || "";
+    document.getElementById("baseUrlInput").value = base_url || "";
+  }
 
   const el = document.getElementById("keyStatus");
-  el.textContent = (has_key ? "Key set for this session." : "No key set.") + ` Model: ${model}`;
-  el.className = "key-status " + (has_key ? "ok" : "missing");
+  const providerLabel = provider === "anthropic" ? "Claude" : "Open-source/OpenAI-compatible";
+  let statusText = (has_key ? "Key set." : "No key set.") + ` Provider: ${providerLabel}. Model: ${model || "(none)"}.`;
+  if (provider === "openai_compatible") {
+    statusText += ` Server: ${base_url || "(not set)"}.`;
+  }
+  el.textContent = statusText;
+  el.className = "key-status " + (has_key || provider === "openai_compatible" ? "ok" : "missing");
 }
 
 document.getElementById("saveKeyBtn").addEventListener("click", async () => {
-  const input = document.getElementById("apiKeyInput");
-  const api_key = input.value.trim();
-  const model = document.getElementById("modelSelect").value;
+  const provider = document.getElementById("providerSelect").value;
+  const payload = { provider };
+
+  // Password fields are cleared after every save (nothing left sitting in the
+  // DOM), so only include api_key in the payload when the user actually typed
+  // something new -- otherwise an empty resubmit would wipe out an
+  // already-saved key just because the user changed the model dropdown.
+  if (provider === "anthropic") {
+    const apiKeyInput = document.getElementById("apiKeyInput");
+    if (apiKeyInput.value.trim()) {
+      payload.api_key = apiKeyInput.value.trim();
+    }
+    payload.model = document.getElementById("modelSelect").value;
+    apiKeyInput.value = "";
+  } else {
+    const openaiKeyInput = document.getElementById("openaiKeyInput");
+    if (openaiKeyInput.value.trim()) {
+      payload.api_key = openaiKeyInput.value.trim();
+    }
+    payload.model = document.getElementById("customModelInput").value.trim();
+    payload.base_url = document.getElementById("baseUrlInput").value.trim();
+    openaiKeyInput.value = "";
+  }
+
   try {
-    await api("/api/key", { method: "POST", body: JSON.stringify({ api_key, model }) });
-    input.value = "";
+    await api("/api/key", { method: "POST", body: JSON.stringify(payload) });
     await refreshKeyStatus();
   } catch (e) {
     alert(e.message);
@@ -261,7 +304,7 @@ document.getElementById("analyzeBtn").addEventListener("click", async () => {
   const btn = document.getElementById("analyzeBtn");
   const status = document.getElementById("analyzeStatus");
   btn.disabled = true;
-  status.textContent = "Analyzing with Claude... this can take up to a minute.";
+  status.textContent = "Analyzing... this can take up to a minute.";
   try {
     await api(`/api/sessions/${state.sessionId}/analyze`, {
       method: "POST",

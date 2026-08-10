@@ -1,14 +1,19 @@
-"""Claude-powered reconciliation triage interface.
+"""Recon-Ci Triage: reconciliation triage interface powered by Claude or any
+OpenAI-compatible model server (Ollama, vLLM, LM Studio, OpenRouter, ...).
 
 Run with:
     pip install -r requirements.txt
     python app.py
 
-Then open http://localhost:5000 and enter your Claude API key in the UI
-(the key is kept in server memory for your browser session only -- see
-core/keys.py -- and is never written to disk or the database).
+Then open http://localhost:5000 and pick a provider in the sidebar: Claude
+(enter an API key + pick a model) or an open-source/OpenAI-compatible server
+(enter its base URL + exact model name, and an API key only if the server
+requires one). The connection settings are kept in server memory for your
+browser session only -- see core/keys.py -- and never written to disk or the
+database. Switch providers any time; session context carries over either way.
 
-Edit config/rules.py to change the triage rules / system prompt Claude uses.
+Edit config/rules.py to change the triage rules / system prompt sent to
+whichever model is active.
 """
 
 from __future__ import annotations
@@ -20,8 +25,8 @@ from pathlib import Path
 
 from flask import Flask, jsonify, request, send_file, session, render_template
 
-from core import db, keys, xlsx_ingest, report_builder
-from core.claude_client import ClaudeAnalysisError, run_analysis
+from core import claude_client, db, keys, openai_client, xlsx_ingest, report_builder
+from core.llm_errors import LLMAnalysisError
 from config.rules import MAX_SAMPLE_ROWS_PER_SHEET, AVAILABLE_MODELS
 
 AVAILABLE_MODEL_IDS = {m["id"] for m in AVAILABLE_MODELS}
@@ -52,29 +57,49 @@ def index():
 @app.route("/api/key", methods=["POST"])
 def set_key():
     data = request.get_json(silent=True) or {}
-    api_key = (data.get("api_key") or "").strip()
-    model = (data.get("model") or "").strip()
-
-    if not api_key and not model:
-        return jsonify({"error": "api_key or model is required"}), 400
-    if model and model not in AVAILABLE_MODEL_IDS:
-        return jsonify({"error": f"Unknown model '{model}'. Choose one of: {sorted(AVAILABLE_MODEL_IDS)}"}), 400
+    if not data:
+        return jsonify({"error": "no fields provided"}), 400
 
     browser_id = _browser_id()
-    if api_key:
-        keys.set_key(browser_id, api_key)
-    if model:
-        keys.set_model(browser_id, model)
+    current = keys.get_settings(browser_id)
+    fields = {}
+
+    if "provider" in data:
+        provider = (data.get("provider") or "").strip()
+        if provider not in keys.PROVIDERS:
+            return jsonify({"error": f"Unknown provider '{provider}'. Choose one of: {list(keys.PROVIDERS)}"}), 400
+        fields["provider"] = provider
+
+    if "api_key" in data:
+        fields["api_key"] = (data.get("api_key") or "").strip() or None
+
+    if "model" in data:
+        model = (data.get("model") or "").strip()
+        effective_provider = fields.get("provider", current["provider"])
+        if effective_provider == keys.PROVIDER_ANTHROPIC and model not in AVAILABLE_MODEL_IDS:
+            return jsonify({"error": f"Unknown Claude model '{model}'. Choose one of: {sorted(AVAILABLE_MODEL_IDS)}"}), 400
+        fields["model"] = model
+
+    if "base_url" in data:
+        fields["base_url"] = (data.get("base_url") or "").strip()
+
+    keys.update_settings(browser_id, fields)
     return jsonify({"status": "ok"})
 
 
 @app.route("/api/key/status")
 def key_status():
-    browser_id = _browser_id()
+    s = keys.get_settings(_browser_id())
     return jsonify({
-        "has_key": keys.has_key(browser_id),
-        "model": keys.get_model(browser_id),
+        "has_key": bool(s["api_key"]),
+        "provider": s["provider"],
+        "model": s["model"],
+        "base_url": s["base_url"],
         "available_models": AVAILABLE_MODELS,
+        "providers": [
+            {"id": keys.PROVIDER_ANTHROPIC, "label": "Claude (Anthropic)"},
+            {"id": keys.PROVIDER_OPENAI_COMPATIBLE, "label": "Open-source / OpenAI-compatible (Ollama, vLLM, LM Studio, OpenRouter, ...)"},
+        ],
     })
 
 
@@ -183,9 +208,14 @@ def analyze(session_id):
     if not db.get_session(session_id):
         return jsonify({"error": "session not found"}), 404
 
-    api_key = keys.get_key(_browser_id())
-    if not api_key:
+    settings = keys.get_settings(_browser_id())
+    provider = settings["provider"]
+    if provider == keys.PROVIDER_ANTHROPIC and not settings["api_key"]:
         return jsonify({"error": "No Claude API key set. Enter one in the sidebar first."}), 401
+    if provider == keys.PROVIDER_OPENAI_COMPATIBLE and not settings["base_url"]:
+        return jsonify({"error": "No server URL set. Enter one in the sidebar (e.g. http://localhost:11434/v1 for Ollama)."}), 400
+    if provider == keys.PROVIDER_OPENAI_COMPATIBLE and not settings["model"]:
+        return jsonify({"error": "No model name set. Enter the exact model name your server exposes (e.g. llama3.1:70b)."}), 400
 
     data = request.get_json(silent=True) or {}
     extra_instructions = (data.get("extra_instructions") or "").strip() or None
@@ -208,11 +238,18 @@ def analyze(session_id):
         xlsx_ingest.build_data_digest(tables, triage, MAX_SAMPLE_ROWS_PER_SHEET)
     )
 
-    model = keys.get_model(_browser_id())
     history = db.get_messages(session_id)
     try:
-        outcome = run_analysis(api_key, history, digest, extra_instructions, model=model)
-    except ClaudeAnalysisError as e:
+        if provider == keys.PROVIDER_ANTHROPIC:
+            outcome = claude_client.run_analysis(
+                settings["api_key"], history, digest, extra_instructions, model=settings["model"]
+            )
+        else:
+            outcome = openai_client.run_analysis(
+                settings["api_key"], settings["base_url"], settings["model"],
+                history, digest, extra_instructions,
+            )
+    except LLMAnalysisError as e:
         return jsonify({"error": str(e)}), 502
 
     result = outcome["result"]

@@ -12,16 +12,34 @@
       <div class="brand">Recon-Ci Triage</div>
 
       <div class="key-box">
-        <label for="apiKeyInput">Claude API key</label>
-        <input id="apiKeyInput" type="password" placeholder="sk-ant-..." autocomplete="off">
-        <label for="modelSelect">Model</label>
-        <select id="modelSelect"></select>
+        <label for="providerSelect">Provider</label>
+        <select id="providerSelect">
+          <option value="anthropic">Claude (Anthropic)</option>
+          <option value="openai_compatible">Open-source / OpenAI-compatible</option>
+        </select>
+
+        <div id="anthropicFields">
+          <label for="apiKeyInput">Claude API key</label>
+          <input id="apiKeyInput" type="password" placeholder="sk-ant-..." autocomplete="off">
+          <label for="modelSelect">Model</label>
+          <select id="modelSelect"></select>
+        </div>
+
+        <div id="openaiFields" hidden>
+          <label for="baseUrlInput">Server base URL</label>
+          <input id="baseUrlInput" type="text" placeholder="http://localhost:11434/v1" autocomplete="off">
+          <label for="customModelInput">Model name</label>
+          <input id="customModelInput" type="text" placeholder="e.g. llama3.1:70b" autocomplete="off">
+          <label for="openaiKeyInput">API key (optional)</label>
+          <input id="openaiKeyInput" type="password" placeholder="leave blank if the server doesn't need one" autocomplete="off">
+        </div>
+
         <div class="key-actions">
           <button id="saveKeyBtn" class="btn btn-primary btn-sm">Save</button>
           <button id="clearKeyBtn" class="btn btn-ghost btn-sm">Clear key</button>
         </div>
         <div id="keyStatus" class="key-status">Checking...</div>
-        <div class="key-note">Key is kept in server memory for this browser session only, never saved to disk. Model choice is remembered alongside it.</div>
+        <div class="key-note">Connection settings are kept in server memory for this browser session only, never saved to disk. Switch providers any time -- session context carries over.</div>
       </div>
 
       <button id="newSessionBtn" class="btn btn-primary btn-block">+ New session</button>
@@ -61,7 +79,7 @@
         <section class="panel">
           <h3>2. Analyze &amp; triage</h3>
           <textarea id="extraInstructions" placeholder="Optional: extra instructions for this analysis run (e.g. focus on the NG / Netherlands positions)..."></textarea>
-          <button id="analyzeBtn" class="btn btn-primary">Analyze with Claude</button>
+          <button id="analyzeBtn" class="btn btn-primary">Analyze</button>
           <div id="analyzeStatus" class="muted"></div>
         </section>
 

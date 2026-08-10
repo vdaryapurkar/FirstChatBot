@@ -35,6 +35,8 @@ body { margin: 0; background: var(--bg); color: var(--text); }
 
 .key-box { display: flex; flex-direction: column; gap: 6px; background: rgba(255,255,255,0.06); padding: 10px; border-radius: 8px; }
 .key-box label { font-size: 12px; color: var(--sidebar-muted); }
+#anthropicFields, #openaiFields { display: flex; flex-direction: column; gap: 6px; }
+#anthropicFields[hidden], #openaiFields[hidden] { display: none; }
 .key-box input {
   background: rgba(255,255,255,0.08); border: 1px solid rgba(255,255,255,0.15);
   color: var(--sidebar-text); padding: 8px; border-radius: 6px; font-size: 13px;

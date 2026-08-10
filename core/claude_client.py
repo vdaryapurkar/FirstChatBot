@@ -2,7 +2,8 @@
 
 Structured output is obtained via a forced tool call (submit_triage_analysis)
 rather than asking Claude to emit raw JSON in text -- this is the reliable
-way to get a parseable result back from the API.
+way to get a parseable result back from the API. The tool schema itself is
+shared with core/openai_client.py -- see core/llm_schema.py.
 """
 
 from __future__ import annotations
@@ -12,75 +13,14 @@ import json
 import anthropic
 
 from config.rules import ANALYSIS_SYSTEM_PROMPT, MODEL_NAME
-
-TOOL_NAME = "submit_triage_analysis"
+from core.llm_errors import LLMAnalysisError as ClaudeAnalysisError
+from core.llm_schema import ANALYSIS_PARAMETERS, TOOL_DESCRIPTION, TOOL_NAME, history_to_messages
 
 ANALYSIS_TOOL = {
     "name": TOOL_NAME,
-    "description": "Submit the completed triage analysis for the uploaded reconciliation data.",
-    "input_schema": {
-        "type": "object",
-        "properties": {
-            "summary": {
-                "type": "string",
-                "description": "3-6 sentence executive summary across all uploaded files.",
-            },
-            "triage_categories": {
-                "type": "array",
-                "items": {
-                    "type": "object",
-                    "properties": {
-                        "column": {"type": "string"},
-                        "description": {"type": "string"},
-                        "true_count": {"type": "integer"},
-                        "false_count": {"type": "integer"},
-                        "process_types": {
-                            "type": "array",
-                            "items": {"type": "string", "enum": ["Settlement", "Valuation", "NetValuation", "Credit", "Unknown"]},
-                            "description": "Which process type(s) this mismatch column was observed in.",
-                        },
-                        "correlated_with": {
-                            "type": "array",
-                            "items": {"type": "string"},
-                            "description": "Other mismatch columns whose True/False status always matches this one.",
-                        },
-                    },
-                    "required": ["column", "description"],
-                },
-            },
-            "root_causes": {
-                "type": "array",
-                "items": {
-                    "type": "object",
-                    "properties": {
-                        "issue": {"type": "string"},
-                        "process_type": {"type": "string", "enum": ["Settlement", "Valuation", "NetValuation", "Credit", "Unknown"]},
-                        "explanation": {"type": "string"},
-                        "evidence": {"type": "array", "items": {"type": "string"}},
-                        "affected_scope": {"type": "string"},
-                        "confidence": {"type": "string", "enum": ["high", "medium", "low"]},
-                    },
-                    "required": ["issue", "explanation", "confidence"],
-                },
-            },
-            "recommendations": {"type": "array", "items": {"type": "string"}},
-        },
-        "required": ["summary", "triage_categories", "root_causes", "recommendations"],
-    },
+    "description": TOOL_DESCRIPTION,
+    "input_schema": ANALYSIS_PARAMETERS,
 }
-
-
-class ClaudeAnalysisError(RuntimeError):
-    pass
-
-
-def _history_to_messages(history: list[dict]) -> list[dict]:
-    messages = []
-    for m in history:
-        if m["role"] not in ("user", "assistant"):
-            continue
-        messages.append({"role": m["role"], "content": m["content"]})
-    return messages
 
 
 def run_analysis(
@@ -109,7 +49,7 @@ def run_analysis(
         user_parts.append(f"\nAdditional instructions for this analysis: {extra_instructions}")
     user_message = {"role": "user", "content": "\n".join(user_parts)}
 
-    messages = _history_to_messages(conversation_history) + [user_message]
+    messages = history_to_messages(conversation_history) + [user_message]
 
     client = anthropic.Anthropic(api_key=api_key)
     try:

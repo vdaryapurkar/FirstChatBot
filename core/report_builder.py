@@ -11,12 +11,28 @@ import openpyxl
 from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 from openpyxl.utils import get_column_letter
 
+from core.xlsx_ingest import ordered_mismatchtypes
+
 FONT_NAME = "Arial"
 HEADER_FONT = Font(name=FONT_NAME, size=11, bold=True, color="FFFFFF")
 HEADER_FILL = PatternFill("solid", fgColor="305496")
-TRUE_FILL = PatternFill("solid", fgColor="FCE4E4")
 FALSE_FILL = PatternFill("solid", fgColor="E2EFDA")
 GROUP_FILL = PatternFill("solid", fgColor="D9D9D9")
+
+# One fill per mismatchtype so the different "issues" within a column's sheet
+# are visually distinguishable, not just labeled. Unrecognized mismatchtype
+# values fall back to the "mismatch" fill.
+MISMATCHTYPE_FILLS = {
+    "mismatch": PatternFill("solid", fgColor="FCE4E4"),           # red-ish: genuine value diff
+    "new_post": PatternFill("solid", fgColor="DCE6F7"),           # blue-ish: new position in post
+    "missing_position_post": PatternFill("solid", fgColor="FDEBD3"),  # amber-ish: dropped position
+}
+DEFAULT_MISMATCHTYPE_FILL = MISMATCHTYPE_FILLS["mismatch"]
+MISMATCHTYPE_LABELS = {
+    "mismatch": "Mismatch",
+    "new_post": "New position (post only)",
+    "missing_position_post": "Missing position (post)",
+}
 TITLE_FONT = Font(name=FONT_NAME, size=14, bold=True)
 SUBTITLE_FONT = Font(name=FONT_NAME, size=11, italic=True, color="595959")
 BODY_FONT = Font(name=FONT_NAME, size=10)
@@ -92,32 +108,44 @@ def _build_summary_sheet(wb, triage, analysis, sources, process_types_by_file):
     cell.font = BODY_FONT
     cell.alignment = WRAP
 
-    headers = ["Issue (column)", "TRUE (issue present)", "FALSE (no issue)", "Total", "Description"]
+    headers = ["Issue (column)", "Mismatch Type", "Count", "Process Type(s)", "Description"]
     header_row = summary_end + 2
     for j, h in enumerate(headers, start=1):
         ws.cell(row=header_row, column=j, value=h)
     _style_header_row(ws, header_row, len(headers))
 
-    cat_by_col = {c["column"]: c for c in analysis.get("triage_categories", [])}
+    cat_by_key = {
+        (c.get("column"), c.get("mismatchtype")): c for c in analysis.get("triage_categories", [])
+    }
     r = header_row + 1
     for col, issue in triage.items():
-        cat = cat_by_col.get(col, {})
-        true_n, false_n = len(issue["true_rows"]), len(issue["false_rows"])
-        row_vals = [
-            col,
-            true_n,
-            false_n,
-            true_n + false_n,
-            cat.get("description", ""),
-        ]
-        for j, v in enumerate(row_vals, start=1):
-            c = ws.cell(row=r, column=j, value=v)
-            c.font = BODY_FONT
-            c.border = BORDER
-            c.alignment = WRAP
-        r += 1
+        for mt in ordered_mismatchtypes(issue["true_groups"]):
+            rows = issue["true_groups"][mt]
+            cat = cat_by_key.get((col, mt), {})
+            process_types = sorted({row.get("_process_type", "Unknown") for row in rows})
+            row_vals = [
+                col,
+                MISMATCHTYPE_LABELS.get(mt, mt),
+                len(rows),
+                ", ".join(process_types),
+                cat.get("description", ""),
+            ]
+            for j, v in enumerate(row_vals, start=1):
+                c = ws.cell(row=r, column=j, value=v)
+                c.font = BODY_FONT
+                c.border = BORDER
+                c.alignment = WRAP
+            r += 1
+        if issue["false_rows"]:
+            row_vals = [col, "No issue", len(issue["false_rows"]), "", ""]
+            for j, v in enumerate(row_vals, start=1):
+                c = ws.cell(row=r, column=j, value=v)
+                c.font = BODY_FONT
+                c.border = BORDER
+                c.alignment = WRAP
+            r += 1
 
-    _autosize(ws, [22, 18, 16, 10, 70])
+    _autosize(ws, [22, 26, 10, 24, 60])
     ws.row_dimensions[1].height = 22
 
 
@@ -128,7 +156,7 @@ def _build_root_cause_sheet(wb, analysis):
     ws["A1"] = "Root Cause Analysis"
     ws["A1"].font = TITLE_FONT
 
-    headers = ["Issue", "Process Type", "Explanation", "Evidence", "Affected Scope", "Confidence"]
+    headers = ["Issue", "Column", "Mismatch Type", "Process Type", "Explanation", "Evidence", "Affected Scope", "Confidence"]
     header_row = 3
     for j, h in enumerate(headers, start=1):
         ws.cell(row=header_row, column=j, value=h)
@@ -139,6 +167,8 @@ def _build_root_cause_sheet(wb, analysis):
         evidence = "\n".join(f"- {e}" for e in rc.get("evidence", []))
         row_vals = [
             rc.get("issue", ""),
+            rc.get("column", ""),
+            MISMATCHTYPE_LABELS.get(rc.get("mismatchtype", ""), rc.get("mismatchtype", "")),
             rc.get("process_type", ""),
             rc.get("explanation", ""),
             evidence,
@@ -158,11 +188,11 @@ def _build_root_cause_sheet(wb, analysis):
     r += 1
     for rec in analysis.get("recommendations", []):
         ws.cell(row=r, column=1, value=f"- {rec}").font = BODY_FONT
-        ws.merge_cells(start_row=r, start_column=1, end_row=r, end_column=6)
+        ws.merge_cells(start_row=r, start_column=1, end_row=r, end_column=8)
         ws.cell(row=r, column=1).alignment = WRAP
         r += 1
 
-    _autosize(ws, [28, 16, 45, 40, 22, 12])
+    _autosize(ws, [28, 16, 22, 16, 45, 40, 22, 12])
 
 
 def _build_issue_sheet(wb, col: str, issue: dict):
@@ -175,17 +205,19 @@ def _build_issue_sheet(wb, col: str, issue: dict):
 
     ws["A1"] = f"Triage: {col}"
     ws["A1"].font = TITLE_FONT
-    ws["A2"] = "Rows grouped by TRUE (issue present) then FALSE (no issue)."
+    ws["A2"] = "Rows grouped by mismatch type (each is a distinct issue), then FALSE (no issue)."
     ws["A2"].font = SUBTITLE_FONT
 
     true_rows = issue["true_rows"]
     false_rows = issue["false_rows"]
+    mismatchtypes = ordered_mismatchtypes(issue["true_groups"])
 
     id_cols: list[str] = []
     seen = set()
     for row in (true_rows + false_rows):
         for k in row.keys():
-            if k in (col, pre_col, post_col, "_source_file", "_sheet_name", "_process_type", "_difference"):
+            if k in (col, pre_col, post_col, "_source_file", "_sheet_name", "_process_type",
+                      "_mismatchtype", "_difference"):
                 continue
             if k.startswith("pre_") or k.startswith("post_") or k.lower().endswith("_mismatch"):
                 continue
@@ -204,8 +236,11 @@ def _build_issue_sheet(wb, col: str, issue: dict):
     _style_header_row(ws, header_row, len(headers))
 
     r = header_row + 1
-    for group_rows, fill, label in ((true_rows, TRUE_FILL, "TRUE - issue present"),
-                                     (false_rows, FALSE_FILL, "FALSE - no issue")):
+    groups = [(issue["true_groups"][mt], MISMATCHTYPE_FILLS.get(mt, DEFAULT_MISMATCHTYPE_FILL),
+               f"ISSUE - {MISMATCHTYPE_LABELS.get(mt, mt)}") for mt in mismatchtypes]
+    groups.append((false_rows, FALSE_FILL, "FALSE - no issue"))
+
+    for group_rows, fill, label in groups:
         if not group_rows:
             continue
         ws.cell(row=r, column=1, value=f"{label}  ({len(group_rows)} rows)").font = BOLD_BODY_FONT

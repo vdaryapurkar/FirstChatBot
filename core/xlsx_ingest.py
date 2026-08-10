@@ -16,6 +16,21 @@ from typing import Any
 import pandas as pd
 
 MISMATCH_SUFFIX = "_mismatch"
+MISMATCHTYPE_COLUMN = "mismatchtype"
+
+# mismatchtype values (from the "mismatchtype" column, if present):
+# - "mismatch": a genuine value difference between pre and post for a
+#   position present on both sides -- the real data-quality issue.
+# - "new_post": the position is newly added in post and absent from pre;
+#   pre_* columns are expected to read 0/blank as a consequence, not as an
+#   error in their own right.
+# - "missing_position_post" (also written "missing_post" in some exports,
+#   treated identically): the position was present in pre but is absent
+#   from post; post_* columns are expected to read 0/blank as a
+#   consequence.
+# Rows with no recognizable mismatchtype default to "mismatch".
+MISMATCHTYPE_ALIASES = {"missing_post": "missing_position_post"}
+KNOWN_MISMATCHTYPES = ["mismatch", "new_post", "missing_position_post"]
 
 # Process-type classification rules. Every uploaded workbook is the result of
 # one of four reconciliation processes, identified from its filename and
@@ -77,6 +92,22 @@ def ingest_files(file_paths: list[tuple[str, str]]) -> list[dict]:
     return tables
 
 
+def _normalize_mismatchtype(value: Any) -> str:
+    if value is None:
+        return "mismatch"
+    s = str(value).strip().lower()
+    if not s or s == "nan":
+        return "mismatch"
+    return MISMATCHTYPE_ALIASES.get(s, s)
+
+
+def _find_mismatchtype_column(columns: list[str]) -> str | None:
+    for c in columns:
+        if c.lower() == MISMATCHTYPE_COLUMN:
+            return c
+    return None
+
+
 def _is_true(value: Any) -> bool | None:
     if isinstance(value, bool):
         return value
@@ -119,10 +150,22 @@ def find_mismatch_columns(tables: list[dict]) -> list[str]:
 def compute_triage(tables: list[dict]) -> dict[str, dict]:
     """Group every row, for every mismatch-flag column present, into TRUE
     (issue present) / FALSE (no issue) buckets, and attach the matching
-    pre/post pair + numeric difference when one can be found."""
+    pre/post pair + numeric difference when one can be found.
+
+    TRUE rows are further split into "true_groups" keyed by mismatchtype
+    ("mismatch" / "new_post" / "missing_position_post") -- each (column,
+    mismatchtype) combination is a distinct issue: a genuine value mismatch,
+    a newly-added position, and a dropped position have different root
+    causes and shouldn't be lumped into one bucket or one diff-shape
+    calculation (new/missing rows have a pre or post side of 0, which would
+    otherwise swamp the "is this a constant offset" check for real
+    mismatches). "true_rows" stays as the flattened union of all groups for
+    callers that just want a total count.
+    """
     mismatch_cols = find_mismatch_columns(tables)
     result: dict[str, dict] = {
-        col: {"pre_col": None, "post_col": None, "true_rows": [], "false_rows": [], "unclassified": 0}
+        col: {"pre_col": None, "post_col": None, "true_rows": [], "true_groups": {},
+              "false_rows": [], "unclassified": 0}
         for col in mismatch_cols
     }
 
@@ -130,6 +173,7 @@ def compute_triage(tables: list[dict]) -> dict[str, dict]:
         df, source_file, sheet_name = t["df"], t["source_file"], t["sheet_name"]
         process_type = t.get("process_type", "Unknown")
         columns = [str(c) for c in df.columns]
+        mismatchtype_col = _find_mismatchtype_column(columns)
         for col in mismatch_cols:
             if col not in df.columns:
                 continue
@@ -145,6 +189,9 @@ def compute_triage(tables: list[dict]) -> dict[str, dict]:
                 record["_source_file"] = source_file
                 record["_sheet_name"] = sheet_name
                 record["_process_type"] = process_type
+                record["_mismatchtype"] = _normalize_mismatchtype(
+                    row[mismatchtype_col] if mismatchtype_col else None
+                )
                 if pre_col and post_col:
                     try:
                         pre_v = float(row[pre_col])
@@ -154,11 +201,22 @@ def compute_triage(tables: list[dict]) -> dict[str, dict]:
                         record["_difference"] = None
                 if verdict is True:
                     result[col]["true_rows"].append(record)
+                    result[col]["true_groups"].setdefault(record["_mismatchtype"], []).append(record)
                 elif verdict is False:
                     result[col]["false_rows"].append(record)
                 else:
                     result[col]["unclassified"] += 1
     return result
+
+
+def ordered_mismatchtypes(true_groups: dict[str, list]) -> list[str]:
+    """KNOWN_MISMATCHTYPES first (only the ones present), then any other
+    values found in the data, alphabetically -- a stable, readable order for
+    sheets/tables without hardcoding every value a source system might use."""
+    present = set(true_groups.keys())
+    ordered = [mt for mt in KNOWN_MISMATCHTYPES if mt in present]
+    ordered += sorted(present - set(ordered))
+    return ordered
 
 
 def _diff_shape(rows: list[dict]) -> dict:
@@ -190,17 +248,21 @@ def build_data_digest(tables: list[dict], triage: dict[str, dict], max_sample_ro
     issues = []
     for col, data in triage.items():
         true_n, false_n = len(data["true_rows"]), len(data["false_rows"])
-        issues.append({
-            "column": col,
-            "pre_column": data["pre_col"],
-            "post_column": data["post_col"],
-            "true_count": true_n,
-            "false_count": false_n,
-            "unclassified_count": data["unclassified"],
-            "true_row_difference_shape": _diff_shape(data["true_rows"]),
-            "sample_true_rows": data["true_rows"][:max_sample_rows],
-            "sample_false_rows": data["false_rows"][:max_sample_rows],
-        })
+        for mt in ordered_mismatchtypes(data["true_groups"]):
+            rows = data["true_groups"][mt]
+            process_types = sorted({r.get("_process_type", "Unknown") for r in rows})
+            issues.append({
+                "column": col,
+                "mismatchtype": mt,
+                "pre_column": data["pre_col"],
+                "post_column": data["post_col"],
+                "count": len(rows),
+                "column_true_total": true_n,
+                "column_false_total": false_n,
+                "process_types": process_types,
+                "difference_shape": _diff_shape(rows),
+                "sample_rows": rows[:max_sample_rows],
+            })
 
     return {
         "files": files,

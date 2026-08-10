@@ -59,24 +59,53 @@ than blending them -- a root cause identified in a Settlement file should
 not be assumed to explain a break in a Valuation file unless the evidence
 actually supports that.
 
+Mismatch types: every flagged row also carries a "mismatchtype", already
+classified in Python and provided to you per row (do not reclassify --
+treat it as ground truth). It explains *why* the row is flagged, separately
+from *which* column (qty_mismatch, value_mismatch, marketvalue_mismatch,
+rowcountsum_mismatch, and so on) is flagged:
+
+- "mismatch": a genuine value difference between pre and post for a
+  position that exists on both sides. This is the real data-quality issue
+  and usually needs the deepest root-cause digging.
+- "new_post": the position is newly added in post and did not exist in
+  pre. Its pre_* columns are expected to read 0 as a direct consequence --
+  that is not itself an error. The question worth asking is whether the
+  new position is legitimate (e.g. a new trade booked between runs) or an
+  unexpected addition.
+- "missing_position_post" (equivalently "missing_post"): the position
+  existed in pre but is absent from post. Its post_* columns are expected
+  to read 0 as a direct consequence. The question worth asking is whether
+  it's an intentional close-out/expiry or an unexpected drop.
+
+Treat every (mismatch column, mismatchtype) combination you're given as its
+own distinct issue -- do not merge a "value_mismatch / new_post" issue with
+a "value_mismatch / mismatch" issue into one description or one root cause,
+even though they share a column, because they have different underlying
+causes. The digest already pre-splits rows this way (each entry in
+"issues" is one such combination with its own row count and evidence
+sample) -- your triage_categories and root_causes should follow the same
+(column, mismatchtype) granularity, tagging each with the mismatchtype and
+the process type(s) it was observed in.
+
 Your job:
 
-1. Triage: confirm/refine how rows should be grouped by their mismatch flag
-   columns (columns ending in "_mismatch", or boolean-looking columns the
-   data makes clear are pass/fail indicators). Group by TRUE (issue present)
-   vs FALSE (no issue) for each such column, and note any correlations
-   between columns (e.g. two flags that are always true/false together
-   suggest a shared root cause).
+1. Triage: for each (column, mismatchtype) issue you're given, confirm/
+   refine its description, and note any correlations between mismatch
+   columns (e.g. two flags that are always true/false together on the same
+   rows suggest a shared root cause).
 
-2. Root cause: for each TRUE bucket, explain the most likely underlying
-   cause of the mismatch using the evidence in the data -- look for constant
-   offsets vs. proportional differences, patterns tied to product/market/
-   position type, whether the difference is on the "value" side vs
-   "quantity" side, whether extra/missing rows are involved, and anything
-   consistent across files if multiple files were uploaded. Prefer the
-   simplest explanation consistent with the evidence over speculation. Say
-   plainly when the data is insufficient to pin down a root cause, and state
-   what additional evidence would confirm it.
+2. Root cause: for each issue, explain the most likely underlying cause
+   using the evidence in the data -- look for constant offsets vs.
+   proportional differences (only meaningful within "mismatch"-type rows,
+   since "new_post"/"missing_position_post" rows have a 0 on one side by
+   construction), patterns tied to product/market/position type, whether
+   the difference is on the "value" side vs "quantity" side, whether extra/
+   missing rows are involved, and anything consistent across files if
+   multiple files were uploaded. Prefer the simplest explanation consistent
+   with the evidence over speculation. Say plainly when the data is
+   insufficient to pin down a root cause, and state what additional
+   evidence would confirm it.
 
 3. Summary: a short executive summary (3-6 sentences) covering what was
    found across all uploaded files, how many rows/positions are affected per
