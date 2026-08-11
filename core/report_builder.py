@@ -11,7 +11,11 @@ import openpyxl
 from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 from openpyxl.utils import get_column_letter
 
-from core.xlsx_ingest import ordered_mismatchtypes
+from core.xlsx_ingest import (
+    CATEGORY_BUY_SELL,
+    CATEGORY_OTHER,
+    ordered_mismatchtypes,
+)
 
 FONT_NAME = "Arial"
 HEADER_FONT = Font(name=FONT_NAME, size=11, bold=True, color="FFFFFF")
@@ -56,10 +60,13 @@ def _autosize(ws, widths: list[int]):
         ws.column_dimensions[get_column_letter(i)].width = w
 
 
-def build_report(triage: dict[str, dict], analysis: dict, sources: list[str], output_path: str,
+def build_report(triage: dict[str, dict], structural: dict[str, dict], analysis: dict,
+                  sources: list[str], output_path: str,
                   process_types_by_file: dict[str, str] | None = None):
-    """triage: the FULL, uncapped output of xlsx_ingest.compute_triage (every
-    row, not the token-budget-limited sample that was sent to Claude).
+    """triage: the FULL, uncapped per-column output of xlsx_ingest.compute_triage
+    (every row, not the token-budget-limited sample that was sent to Claude).
+    structural: the FULL, uncapped {mismatchtype: {category: [rows]}} output of
+    compute_triage -- the pooled/deduped "new_post"/"missing_position_post" rows.
     analysis: the parsed tool-call dict from claude_client.run_analysis (the
     'result' key: summary/triage_categories/root_causes/recommendations).
     sources: list of original uploaded file names included in this report.
@@ -69,22 +76,45 @@ def build_report(triage: dict[str, dict], analysis: dict, sources: list[str], ou
     wb = openpyxl.Workbook()
     wb.remove(wb.active)
 
-    # Columns with zero TRUE rows reconciled cleanly (e.g. exposureqty_mismatch,
+    # A column with zero TRUE rows reconciled cleanly (e.g. exposureqty_mismatch,
     # expprice_mismatch on a run where those never differ) -- no issue to
-    # report, so skip their detail sheet and their Summary row entirely rather
+    # report, so skip its detail sheet and its Summary row entirely rather
     # than padding the workbook with tabs that only ever show "No issue".
-    flagged = {col: issue for col, issue in triage.items() if issue["true_rows"]}
-    clean_column_count = len(triage) - len(flagged)
+    # "true_groups" (not "true_rows") drives this: it already excludes the
+    # structural new_post/missing_position_post rows, which get their own
+    # pooled sheets below instead of a per-column one.
+    flagged = {col: issue for col, issue in triage.items() if issue["true_groups"]}
+    clean_column_count = sum(1 for issue in triage.values() if not issue["true_rows"])
 
-    _build_summary_sheet(wb, flagged, analysis, sources, process_types_by_file or {}, clean_column_count)
+    _build_summary_sheet(wb, triage, structural, analysis, sources,
+                          process_types_by_file or {}, clean_column_count)
     _build_root_cause_sheet(wb, analysis)
     for col, issue in flagged.items():
         _build_issue_sheet(wb, col, issue)
+    for mismatchtype in _ordered_structural_types(structural):
+        _build_structural_sheet(wb, mismatchtype, structural[mismatchtype])
 
     wb.save(output_path)
 
 
-def _build_summary_sheet(wb, triage, analysis, sources, process_types_by_file, clean_column_count=0):
+def _ordered_structural_types(structural: dict[str, dict]) -> list[str]:
+    """new_post, then missing_position_post, then anything else -- only the
+    ones actually present in this run's data."""
+    present = set(structural.keys())
+    ordered = [mt for mt in ("new_post", "missing_position_post") if mt in present]
+    ordered += sorted(present - set(ordered))
+    return ordered
+
+
+def _ordered_categories(categories: dict[str, list]) -> list[str]:
+    """BUY/SELL first, then Other, then any other category value found."""
+    present = set(categories.keys())
+    ordered = [c for c in (CATEGORY_BUY_SELL, CATEGORY_OTHER) if c in present]
+    ordered += sorted(present - set(ordered))
+    return ordered
+
+
+def _build_summary_sheet(wb, triage, structural, analysis, sources, process_types_by_file, clean_column_count=0):
     ws = wb.create_sheet("Summary")
     ws.sheet_view.showGridLines = False
 
@@ -118,6 +148,7 @@ def _build_summary_sheet(wb, triage, analysis, sources, process_types_by_file, c
     r = summary_end + 1
 
     issue_count = sum(len(issue["true_groups"]) for issue in triage.values())
+    issue_count += sum(len(categories) for categories in structural.values())
     bug_report = analysis.get("bug_report") or {}
     if issue_count > 1 and (bug_report.get("synopsis") or bug_report.get("description")):
         r += 1
@@ -150,7 +181,7 @@ def _build_summary_sheet(wb, triage, analysis, sources, process_types_by_file, c
         ws.merge_cells(start_row=r, start_column=1, end_row=r, end_column=6)
         r += 1
 
-    headers = ["Issue (column)", "Mismatch Type", "Count", "Process Type(s)", "Description"]
+    headers = ["Issue (column(s))", "Mismatch Type", "Category", "Count", "Process Type(s)", "Description"]
     header_row = r + 1
     for j, h in enumerate(headers, start=1):
         ws.cell(row=header_row, column=j, value=h)
@@ -158,7 +189,16 @@ def _build_summary_sheet(wb, triage, analysis, sources, process_types_by_file, c
 
     cat_by_key = {
         (c.get("column"), c.get("mismatchtype")): c for c in analysis.get("triage_categories", [])
+        if c.get("column")
     }
+    struct_cat_by_key = {
+        (c.get("mismatchtype"), c.get("category")): c for c in analysis.get("triage_categories", [])
+        if c.get("category") and not c.get("column")
+    }
+
+    # Column-specific issues (mostly "mismatch") stay one row per (column,
+    # mismatchtype). Rows with no issue at all ("No issue" / all-False) are
+    # not reconciliation breaks and are left out of this table entirely.
     r = header_row + 1
     for col, issue in triage.items():
         for mt in ordered_mismatchtypes(issue["true_groups"]):
@@ -168,6 +208,7 @@ def _build_summary_sheet(wb, triage, analysis, sources, process_types_by_file, c
             row_vals = [
                 col,
                 MISMATCHTYPE_LABELS.get(mt, mt),
+                "-",
                 len(rows),
                 ", ".join(process_types),
                 cat.get("description", ""),
@@ -178,8 +219,25 @@ def _build_summary_sheet(wb, triage, analysis, sources, process_types_by_file, c
                 c.border = BORDER
                 c.alignment = WRAP
             r += 1
-        if issue["false_rows"]:
-            row_vals = [col, "No issue", len(issue["false_rows"]), "", ""]
+
+    # Structural issues (new_post / missing_position_post) are pooled across
+    # every column they triggered and shown once per (mismatchtype,
+    # category) instead of once per column -- see xlsx_ingest.compute_triage.
+    for mt in _ordered_structural_types(structural):
+        categories = structural[mt]
+        for category in _ordered_categories(categories):
+            rows = categories[category]
+            triggered_columns = sorted({c for row in rows for c in row.get("_triggered_columns", [])})
+            cat = struct_cat_by_key.get((mt, category), {})
+            process_types = sorted({row.get("_process_type", "Unknown") for row in rows})
+            row_vals = [
+                ", ".join(triggered_columns),
+                MISMATCHTYPE_LABELS.get(mt, mt),
+                category,
+                len(rows),
+                ", ".join(process_types),
+                cat.get("description", ""),
+            ]
             for j, v in enumerate(row_vals, start=1):
                 c = ws.cell(row=r, column=j, value=v)
                 c.font = BODY_FONT
@@ -187,7 +245,7 @@ def _build_summary_sheet(wb, triage, analysis, sources, process_types_by_file, c
                 c.alignment = WRAP
             r += 1
 
-    _autosize(ws, [22, 26, 10, 24, 60])
+    _autosize(ws, [24, 26, 12, 10, 24, 60])
     ws.row_dimensions[1].height = 22
 
 
@@ -198,7 +256,7 @@ def _build_root_cause_sheet(wb, analysis):
     ws["A1"] = "Root Cause Analysis"
     ws["A1"].font = TITLE_FONT
 
-    headers = ["Issue", "Column", "Mismatch Type", "Process Type", "Explanation", "Evidence", "Affected Scope", "Confidence"]
+    headers = ["Issue", "Column", "Mismatch Type", "Category", "Process Type", "Explanation", "Evidence", "Affected Scope", "Confidence"]
     header_row = 3
     for j, h in enumerate(headers, start=1):
         ws.cell(row=header_row, column=j, value=h)
@@ -211,6 +269,7 @@ def _build_root_cause_sheet(wb, analysis):
             rc.get("issue", ""),
             rc.get("column", ""),
             MISMATCHTYPE_LABELS.get(rc.get("mismatchtype", ""), rc.get("mismatchtype", "")),
+            rc.get("category", "") or "-",
             rc.get("process_type", ""),
             rc.get("explanation", ""),
             evidence,
@@ -230,11 +289,11 @@ def _build_root_cause_sheet(wb, analysis):
     r += 1
     for rec in analysis.get("recommendations", []):
         ws.cell(row=r, column=1, value=f"- {rec}").font = BODY_FONT
-        ws.merge_cells(start_row=r, start_column=1, end_row=r, end_column=8)
+        ws.merge_cells(start_row=r, start_column=1, end_row=r, end_column=9)
         ws.cell(row=r, column=1).alignment = WRAP
         r += 1
 
-    _autosize(ws, [28, 16, 22, 16, 45, 40, 22, 12])
+    _autosize(ws, [28, 16, 22, 12, 16, 45, 40, 22, 12])
 
 
 def _build_issue_sheet(wb, col: str, issue: dict):
@@ -259,7 +318,7 @@ def _build_issue_sheet(wb, col: str, issue: dict):
     for row in (true_rows + false_rows):
         for k in row.keys():
             if k in (col, pre_col, post_col, "_source_file", "_sheet_name", "_process_type",
-                      "_mismatchtype", "_difference"):
+                      "_mismatchtype", "_category", "_triggered_columns", "_difference"):
                 continue
             if k.startswith("pre_") or k.startswith("post_") or k.lower().endswith("_mismatch"):
                 continue
@@ -314,3 +373,66 @@ def _build_issue_sheet(wb, col: str, issue: dict):
             r += 1
 
     _autosize(ws, [16, 14, 14] + [14] * len(id_cols) + ([16, 16, 16] if pre_col else []) + [10])
+
+
+def _build_structural_sheet(wb, mismatchtype: str, categories: dict[str, list]):
+    """One sheet per structural mismatchtype (new_post / missing_position_post),
+    with rows grouped by position-type category (BUY/SELL vs Other) instead of
+    duplicated once per mismatch column -- see xlsx_ingest.compute_triage."""
+    label = MISMATCHTYPE_LABELS.get(mismatchtype, mismatchtype)
+    ws = wb.create_sheet(label[:31])
+    ws.sheet_view.showGridLines = False
+    ws.freeze_panes = "A4"
+
+    ws["A1"] = f"Triage: {label}"
+    ws["A1"].font = TITLE_FONT
+    ws["A2"] = ("Each position appears once, pooled across every mismatch column it "
+                "triggered, grouped by position type.")
+    ws["A2"].font = SUBTITLE_FONT
+
+    all_rows = [row for rows in categories.values() for row in rows]
+    id_cols: list[str] = []
+    seen = set()
+    for row in all_rows:
+        for k in row.keys():
+            if k in ("_source_file", "_sheet_name", "_process_type", "_mismatchtype",
+                      "_category", "_triggered_columns", "_difference"):
+                continue
+            if k.lower().endswith("_mismatch"):
+                continue
+            if k not in seen:
+                seen.add(k)
+                id_cols.append(k)
+
+    headers = ["source_file", "sheet_name", "process_type", "triggered_columns"] + id_cols
+    header_row = 4
+    for j, h in enumerate(headers, start=1):
+        ws.cell(row=header_row, column=j, value=h)
+    _style_header_row(ws, header_row, len(headers))
+
+    fill = MISMATCHTYPE_FILLS.get(mismatchtype, DEFAULT_MISMATCHTYPE_FILL)
+    r = header_row + 1
+    for category in _ordered_categories(categories):
+        rows = categories[category]
+        if not rows:
+            continue
+        ws.cell(row=r, column=1, value=f"CATEGORY - {category}  ({len(rows)} rows)").font = BOLD_BODY_FONT
+        ws.merge_cells(start_row=r, start_column=1, end_row=r, end_column=len(headers))
+        ws.cell(row=r, column=1).fill = GROUP_FILL
+        r += 1
+        for row in rows:
+            values = [
+                row.get("_source_file", ""),
+                row.get("_sheet_name", ""),
+                row.get("_process_type", "Unknown"),
+                ", ".join(row.get("_triggered_columns", [])),
+            ]
+            values += [row.get(k, "") for k in id_cols]
+            for j, v in enumerate(values, start=1):
+                c = ws.cell(row=r, column=j, value=v)
+                c.font = BODY_FONT
+                c.border = BORDER
+                c.fill = fill
+            r += 1
+
+    _autosize(ws, [16, 14, 14, 30] + [14] * len(id_cols))

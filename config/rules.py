@@ -78,22 +78,49 @@ rowcountsum_mismatch, and so on) is flagged:
   to read 0 as a direct consequence. The question worth asking is whether
   it's an intentional close-out/expiry or an unexpected drop.
 
-Treat every (mismatch column, mismatchtype) combination you're given as its
-own distinct issue -- do not merge a "value_mismatch / new_post" issue with
-a "value_mismatch / mismatch" issue into one description or one root cause,
-even though they share a column, because they have different underlying
-causes. The digest already pre-splits rows this way (each entry in
-"issues" is one such combination with its own row count and evidence
-sample) -- your triage_categories and root_causes should follow the same
-(column, mismatchtype) granularity, tagging each with the mismatchtype and
-the process type(s) it was observed in.
+Grouping rule -- read carefully, it differs by mismatchtype:
+
+- "mismatch" (and "other"): stays one issue per (column, mismatchtype), as
+  before. Treat every (column, mismatchtype) combination you're given as
+  its own distinct issue -- do not merge a "qty_mismatch / mismatch" issue
+  with a "rowcountsum_mismatch / mismatch" issue into one description or
+  root cause just because the same underlying trade drove both; each
+  column is still its own issue since it represents a distinct check. The
+  digest's "issues" list is already split this way; your triage_categories
+  and root_causes entries for these should set "column" and "mismatchtype"
+  to match, one issue per combination.
+- "new_post" / "missing_position_post": these are structural facts about a
+  position, not a per-column data-quality signal -- the same new/dropped
+  position trips every "*_mismatch" column on that row at once (one side
+  reads 0 by construction), so it is already pooled and deduped in Python
+  across every column it triggered, and bucketed into exactly two
+  categories by positiontype: "BUY/SELL" (positiontype is BUY or SELL) or
+  "Other" (anything else). The digest's "structural_issues" list reflects
+  this: one entry per (mismatchtype, category), each listing every column
+  it triggered under "triggered_columns". Mirror that exactly -- for these
+  two mismatchtypes, produce exactly one triage_categories entry and at
+  most one root_causes entry per (mismatchtype, category) pair actually
+  present in "structural_issues" (so ordinarily up to 4 total: new_post x
+  {BUY/SELL, Other} and missing_position_post x {BUY/SELL, Other}, fewer if
+  a category has no rows). Set "category" (not "column") on these entries,
+  and do not create a separate entry per triggered column -- that would
+  recreate the duplication Python already collapsed.
+
+For "new_post"/"missing_position_post" descriptions specifically: category
+is the headline, not values. Lead with what the category means structurally
+(e.g. "12 new BUY/SELL positions added in post") rather than restating
+pre/post numbers, since those are 0 on one side by construction and are not
+themselves informative. Only pivot to a value-based description when the
+pooled rows actually show a real pattern worth naming (e.g. all the new
+positions cluster in one market, or share an unusual size/price range) --
+state the pattern explicitly when you use it, don't just default to it.
 
 Your job:
 
-1. Triage: for each (column, mismatchtype) issue you're given, confirm/
-   refine its description, and note any correlations between mismatch
-   columns (e.g. two flags that are always true/false together on the same
-   rows suggest a shared root cause).
+1. Triage: for each issue you're given (per the grouping rule above),
+   confirm/refine its description, and note any correlations between
+   mismatch columns (e.g. two flags that are always true/false together on
+   the same rows suggest a shared root cause).
 
 2. Root cause: for each issue, explain the most likely underlying cause
    using the evidence in the data -- look for constant offsets vs.
@@ -118,8 +145,10 @@ Your job:
 5. Bug report: always populate "bug_report" with a "synopsis" (one-line
    title) and "description" (plain text -- no markdown syntax such as #,
    **, or _, since this is pasted directly into a bug tracker's description
-   field). When there are multiple distinct (column, mismatchtype) issues,
-   the description must cover every one of them: for each, name the column,
+   field). When there are multiple distinct issues (per the grouping rule
+   above -- (column, mismatchtype) for "mismatch"/"other", (mismatchtype,
+   category) for "new_post"/"missing_position_post"), the description must
+   cover every one of them: for each, name the column or category, the
    mismatchtype, process type(s), affected row count, root cause, and
    supporting evidence, using plain line breaks and "- " bullets so it
    reads cleanly once pasted into a TFS/Azure DevOps bug. The synopsis

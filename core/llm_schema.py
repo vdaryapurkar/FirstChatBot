@@ -16,6 +16,7 @@ TOOL_DESCRIPTION = "Submit the completed triage analysis for the uploaded reconc
 
 PROCESS_TYPES = ["Settlement", "Valuation", "NetValuation", "Credit", "Unknown"]
 MISMATCHTYPES = ["mismatch", "new_post", "missing_position_post", "other"]
+CATEGORIES = ["BUY/SELL", "Other"]
 
 ANALYSIS_PARAMETERS = {
     "type": "object",
@@ -29,7 +30,16 @@ ANALYSIS_PARAMETERS = {
             "items": {
                 "type": "object",
                 "properties": {
-                    "column": {"type": "string"},
+                    "column": {
+                        "type": "string",
+                        "description": (
+                            "The single mismatch column this issue is specific to. Set this for "
+                            "'mismatch' (and 'other') mismatchtype issues, which stay one issue "
+                            "per column. Leave unset for 'new_post'/'missing_position_post' "
+                            "issues -- those are pooled across every column they triggered, so "
+                            "set 'category' instead, not 'column'."
+                        ),
+                    },
                     "mismatchtype": {
                         "type": "string",
                         "enum": MISMATCHTYPES,
@@ -41,12 +51,36 @@ ANALYSIS_PARAMETERS = {
                             "post), or 'other' for any value not in that set."
                         ),
                     },
-                    "description": {"type": "string"},
+                    "category": {
+                        "type": "string",
+                        "enum": CATEGORIES,
+                        "description": (
+                            "Only for 'new_post'/'missing_position_post' issues: the position-"
+                            "type category this issue covers -- 'BUY/SELL' if positiontype is "
+                            "BUY or SELL, else 'Other'. Each (mismatchtype, category) pair is "
+                            "exactly one issue, already pooled across every column it triggered "
+                            "in Python -- do not also set 'column' for these, and do not split or "
+                            "merge these pairs further. Leave unset for 'mismatch'/'other' issues."
+                        ),
+                    },
+                    "description": {
+                        "type": "string",
+                        "description": (
+                            "For 'new_post'/'missing_position_post' issues, lead with the "
+                            "category and what it means structurally (e.g. a new BUY/SELL "
+                            "position added in post) rather than restating pre/post values -- "
+                            "those are 0 on one side by construction, not informative on their "
+                            "own. Only describe a value-based pattern if one actually exists "
+                            "across the pooled rows (e.g. all new positions share a market or a "
+                            "size range). For 'mismatch' issues, values remain the primary "
+                            "evidence as usual."
+                        ),
+                    },
                     "count": {"type": "integer"},
                     "process_types": {
                         "type": "array",
                         "items": {"type": "string", "enum": PROCESS_TYPES},
-                        "description": "Which process type(s) this (column, mismatchtype) issue was observed in.",
+                        "description": "Which process type(s) this issue was observed in.",
                     },
                     "correlated_with": {
                         "type": "array",
@@ -54,7 +88,7 @@ ANALYSIS_PARAMETERS = {
                         "description": "Other mismatch columns whose True/False status always matches this one.",
                     },
                 },
-                "required": ["column", "mismatchtype", "description"],
+                "required": ["mismatchtype", "description"],
             },
         },
         "root_causes": {
@@ -63,8 +97,16 @@ ANALYSIS_PARAMETERS = {
                 "type": "object",
                 "properties": {
                     "issue": {"type": "string"},
-                    "column": {"type": "string"},
+                    "column": {
+                        "type": "string",
+                        "description": "Set for 'mismatch'/'other' issues. Leave unset for 'new_post'/'missing_position_post' -- use 'category' instead.",
+                    },
                     "mismatchtype": {"type": "string", "enum": MISMATCHTYPES},
+                    "category": {
+                        "type": "string",
+                        "enum": CATEGORIES,
+                        "description": "Only for 'new_post'/'missing_position_post' root causes: which position-type category ('BUY/SELL' or 'Other') this root cause explains.",
+                    },
                     "process_type": {"type": "string", "enum": PROCESS_TYPES},
                     "explanation": {"type": "string"},
                     "evidence": {"type": "array", "items": {"type": "string"}},

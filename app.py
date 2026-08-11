@@ -243,9 +243,9 @@ def analyze(session_id):
     if not tables:
         return jsonify({"error": "Uploaded files contained no readable data."}), 400
 
-    triage = xlsx_ingest.compute_triage(tables)
+    triage, structural = xlsx_ingest.compute_triage(tables)
     digest = xlsx_ingest.json_safe(
-        xlsx_ingest.build_data_digest(tables, triage, MAX_SAMPLE_ROWS_PER_SHEET)
+        xlsx_ingest.build_data_digest(tables, triage, structural, MAX_SAMPLE_ROWS_PER_SHEET)
     )
 
     history = db.get_messages(session_id)
@@ -272,7 +272,7 @@ def analyze(session_id):
     report_path = session_report_dir / report_filename
 
     sources = sorted({u["original_name"] for u in uploads})
-    report_builder.build_report(triage, result, sources, str(report_path),
+    report_builder.build_report(triage, structural, result, sources, str(report_path),
                                  process_types_by_file=digest.get("process_types_by_file"))
 
     report_id = db.add_report(session_id, str(report_path), result.get("summary", ""))
