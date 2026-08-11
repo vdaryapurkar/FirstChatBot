@@ -141,29 +141,32 @@ def _build_summary_sheet(wb, grouped, analysis, sources, process_types_by_file, 
     cell.alignment = WRAP
     r = summary_end + 1
 
-    issue_count = sum(len(groups) for groups in grouped.values())
-    bug_report = analysis.get("bug_report") or {}
-    if issue_count > 1 and (bug_report.get("synopsis") or bug_report.get("description")):
+    # One synopsis + description per distinct issue (see core/llm_schema.py's
+    # "bug_reports"), each meant to be pasted into its OWN separate TFS/Azure
+    # DevOps ticket -- not merged into a single combined bug report.
+    bug_reports = [b for b in analysis.get("bug_reports", []) if b.get("synopsis") or b.get("description")]
+    if bug_reports:
         r += 1
         ws.cell(row=r, column=1,
-                value="Bug Report (copy into TFS to file an investigation ticket)").font = BOLD_BODY_FONT
+                value="Bug Reports (copy each into TFS to file a separate investigation ticket)").font = BOLD_BODY_FONT
         r += 1
-        ws.cell(row=r, column=1, value="Synopsis").font = BOLD_BODY_FONT
-        r += 1
-        ws.merge_cells(start_row=r, start_column=1, end_row=r, end_column=6)
-        c = ws.cell(row=r, column=1, value=bug_report.get("synopsis", ""))
-        c.font = BODY_FONT
-        c.alignment = WRAP
-        r += 1
-        ws.cell(row=r, column=1, value="Description").font = BOLD_BODY_FONT
-        r += 1
-        desc_start = r
-        desc_end = desc_start + 9
-        ws.merge_cells(start_row=desc_start, start_column=1, end_row=desc_end, end_column=6)
-        c = ws.cell(row=desc_start, column=1, value=bug_report.get("description", ""))
-        c.font = BODY_FONT
-        c.alignment = WRAP
-        r = desc_end + 1
+        for i, bug in enumerate(bug_reports, start=1):
+            ws.cell(row=r, column=1, value=f"Bug {i} - Synopsis").font = BOLD_BODY_FONT
+            r += 1
+            ws.merge_cells(start_row=r, start_column=1, end_row=r, end_column=6)
+            c = ws.cell(row=r, column=1, value=bug.get("synopsis", ""))
+            c.font = BODY_FONT
+            c.alignment = WRAP
+            r += 1
+            ws.cell(row=r, column=1, value=f"Bug {i} - Description").font = BOLD_BODY_FONT
+            r += 1
+            desc_start = r
+            desc_end = desc_start + 9
+            ws.merge_cells(start_row=desc_start, start_column=1, end_row=desc_end, end_column=6)
+            c = ws.cell(row=desc_start, column=1, value=bug.get("description", ""))
+            c.font = BODY_FONT
+            c.alignment = WRAP
+            r = desc_end + 2
 
     if clean_column_count:
         r += 1

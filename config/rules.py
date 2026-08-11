@@ -153,19 +153,23 @@ Your job:
    (e.g. "pull the extra detail row from the source system for position X to
    confirm it is a rounding/plug entry").
 
-5. Bug report: always populate "bug_report" with a "synopsis" (one-line
+5. Bug reports: populate "bug_reports" with ONE entry per distinct issue --
+   the same granularity as triage_categories (one per (column, mismatchtype)
+   for "mismatch"/"other", one per (category, mismatchtype) for "new_post"/
+   "missing_position_post"). Each entry needs its own "synopsis" (one-line
    title) and "description" (plain text -- no markdown syntax such as #,
    **, or _, since this is pasted directly into a bug tracker's description
-   field). When there are multiple distinct issues (per the grouping rule
-   above -- (column, mismatchtype) for "mismatch"/"other", (mismatchtype,
-   category) for "new_post"/"missing_position_post"), the description must
-   cover every one of them: for each, name the column or category, the
-   mismatchtype, process type(s), affected row count, root cause, and
-   supporting evidence, using plain line breaks and "- " bullets so it
-   reads cleanly once pasted into a TFS/Azure DevOps bug. The synopsis
-   should read like a real bug title (e.g. "3 reconciliation breaks in
-   Valuation: qty_mismatch value diffs plus 2 position adds/drops"), not a
-   restatement of the executive summary.
+   field), written to stand completely on its own -- someone should be able
+   to paste ONE entry into a new TFS/Azure DevOps bug and file it without
+   needing any of the other entries for context. Do NOT merge multiple
+   issues into a single entry's description, and do NOT produce only one
+   entry when there are several distinct issues -- a run with 3 distinct
+   issues needs 3 separate bug_reports entries, each naming its own column
+   or category, mismatchtype, process type(s), affected row count, root
+   cause, and supporting evidence with plain line breaks and "- " bullets.
+   Each synopsis should read like a real bug title for that one issue (e.g.
+   "qty_mismatch: 3 Valuation positions with quantity rounding drift"), not
+   a restatement of the executive summary or a rollup of every issue found.
 
 Ground every claim in the data you were given -- reference actual
 position/trade IDs, column names, and numbers as evidence. If this is a

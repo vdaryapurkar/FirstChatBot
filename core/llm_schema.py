@@ -117,35 +117,49 @@ ANALYSIS_PARAMETERS = {
             },
         },
         "recommendations": {"type": "array", "items": {"type": "string"}},
-        "bug_report": {
-            "type": "object",
+        "bug_reports": {
+            "type": "array",
             "description": (
-                "A synopsis and description written for a bug tracker (e.g. TFS/Azure DevOps), "
-                "ready to paste as-is into a new bug's title and description fields to file one "
-                "ticket covering everything found this run. Always populate both fields -- even "
-                "for a single issue -- but they matter most when there are multiple distinct "
-                "(column, mismatchtype) issues to investigate together."
+                "One synopsis + description per distinct issue -- same granularity as "
+                "triage_categories (one per (column, mismatchtype), or per (category, "
+                "mismatchtype) for 'new_post'/'missing_position_post') -- each ready to paste "
+                "as-is into its OWN separate bug tracker (e.g. TFS/Azure DevOps) ticket. Do NOT "
+                "combine multiple issues into one entry; a run with 3 distinct issues needs 3 "
+                "entries here, each independently filable, not one entry describing all 3."
             ),
-            "properties": {
-                "synopsis": {
-                    "type": "string",
-                    "description": "One-line bug title summarizing the issue(s) found.",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "column": {
+                        "type": "string",
+                        "description": "Which issue this bug is for -- matches that issue's triage_categories 'column'. Leave unset for structural issues; use 'category' instead.",
+                    },
+                    "category": {
+                        "type": "string",
+                        "enum": CATEGORIES,
+                        "description": "Only for 'new_post'/'missing_position_post' issues: matches that issue's triage_categories 'category'.",
+                    },
+                    "mismatchtype": {"type": "string", "enum": MISMATCHTYPES},
+                    "synopsis": {
+                        "type": "string",
+                        "description": "One-line bug title for THIS issue alone (e.g. 'rowcountsum_mismatch: 3 Settlement positions with row-count consolidation').",
+                    },
+                    "description": {
+                        "type": "string",
+                        "description": (
+                            "Plain-text bug body for THIS issue alone: name the column/category, "
+                            "mismatchtype, process type(s), affected row count, root cause, and "
+                            "evidence. Use plain line breaks and '- ' bullets -- no markdown syntax "
+                            "(#, **, _, etc.), since this is pasted directly into a bug tracker's "
+                            "plain/rich-text description field."
+                        ),
+                    },
                 },
-                "description": {
-                    "type": "string",
-                    "description": (
-                        "Plain-text bug body covering every issue found this run: for each, name "
-                        "the column, mismatchtype, process type(s), affected row count, root "
-                        "cause, and evidence. Use plain line breaks and '- ' bullets -- no "
-                        "markdown syntax (#, **, _, etc.), since this is pasted directly into a "
-                        "bug tracker's plain/rich-text description field."
-                    ),
-                },
+                "required": ["mismatchtype", "synopsis", "description"],
             },
-            "required": ["synopsis", "description"],
         },
     },
-    "required": ["summary", "triage_categories", "root_causes", "recommendations", "bug_report"],
+    "required": ["summary", "triage_categories", "root_causes", "recommendations", "bug_reports"],
 }
 
 
