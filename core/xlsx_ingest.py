@@ -37,17 +37,28 @@ KNOWN_MISMATCHTYPES = ["mismatch", "new_post", "missing_position_post"]
 # data-quality issue -- the same row trips every "*_mismatch" column at once
 # (pre_* or post_* all read 0 by construction), so bucketing them per column
 # just repeats the same position N times under N different column headings.
-# These two types are instead pooled across all columns, deduped down to one
-# entry per physical row, and categorized by position type. "mismatch" (and
-# any other/unrecognized mismatchtype value) stays column-specific, since a
-# genuine value difference is still meaningfully tied to which column it's
-# on -- see compute_triage().
+# These two types are pooled across all columns, deduped down to one entry
+# per physical row, and categorized by position type -- see compute_triage().
 STRUCTURAL_MISMATCHTYPES = {"new_post", "missing_position_post"}
 
 POSITIONTYPE_COLUMN = "positiontype"
 BUY_SELL_POSITIONTYPES = {"buy", "sell"}
 CATEGORY_BUY_SELL = "BUY/SELL"
 CATEGORY_OTHER = "Other"
+
+# "mismatch" (and any other/unrecognized mismatchtype) rows are ALSO pooled
+# across columns the same way -- a single row's quantity difference cascades
+# into any column derived from quantity (e.g. pricequantitysum), and a row's
+# row-count change (source-side split/merge of detail rows) cascades into
+# any column that aggregates across rows (e.g. debit/credit/grossvalue), even
+# when the row's own quantity didn't change. When several "*_mismatch"
+# columns are True together for the same physical row, that's one issue, not
+# one per column -- report it under whichever of these two "driving" columns
+# is present, since that's the one actually worth investigating; the rest
+# are listed as "also triggered" for traceability. Falls back to the
+# alphabetically-first triggered column when neither driver is present, so a
+# genuinely standalone column mismatch still gets its own issue as before.
+MISMATCH_PRIMARY_COLUMN_PRIORITY = ["qty_mismatch", "rowcountsum_mismatch"]
 
 # Process-type classification rules. Every uploaded workbook is the result of
 # one of four reconciliation processes, identified from its filename and
@@ -144,6 +155,16 @@ def _positiontype_category(row, positiontype_col: str | None) -> str:
     return CATEGORY_OTHER
 
 
+def _primary_column(triggered_columns: list[str]) -> str:
+    """Which column a non-structural (mismatch/other) issue should be
+    reported under when several columns triggered together on the same row
+    -- see MISMATCH_PRIMARY_COLUMN_PRIORITY above."""
+    for c in MISMATCH_PRIMARY_COLUMN_PRIORITY:
+        if c in triggered_columns:
+            return c
+    return sorted(triggered_columns)[0]
+
+
 def _is_true(value: Any) -> bool | None:
     if isinstance(value, bool):
         return value
@@ -184,34 +205,41 @@ def find_mismatch_columns(tables: list[dict]) -> list[str]:
 
 
 def compute_triage(tables: list[dict]) -> tuple[dict[str, dict], dict[str, dict]]:
-    """Returns (triage, structural).
+    """Returns (triage, grouped).
 
-    triage: per mismatch-flag column, TRUE (issue present) / FALSE (no
-    issue) buckets, with the matching pre/post pair + numeric difference
-    when one can be found. TRUE rows with mismatchtype "mismatch" (or any
-    other non-structural value) are further split into "true_groups" keyed
-    by that mismatchtype -- each (column, mismatchtype) combination is a
-    distinct issue. "true_rows" is the flattened union of all groups
-    *including* structural rows, for callers that just want a raw count of
-    what tripped this column; use "true_groups" for the actual per-issue
-    breakdown, since that's the one structural rows are deliberately
-    excluded from.
+    triage: per mismatch-flag column, the matching pre/post pair (if found),
+    FALSE (no issue) rows, and an unclassified count. "true_rows" is every
+    row that tripped this column, for a raw per-column count -- but every
+    row that tripped ANY column is pooled/deduped across columns (see
+    "grouped" below), since the same physical row commonly trips several
+    "*_mismatch" columns at once for one underlying reason. Use "grouped",
+    not a per-column split, for the actual issue breakdown.
 
-    structural: {mismatchtype: {category: [rows]}} for "new_post" and
-    "missing_position_post" -- pooled across every column that tripped on
-    the same physical row (deduped, since one new/dropped position trips
-    every "*_mismatch" column on that row at once) and bucketed by position
-    type: "BUY/SELL" vs "Other" (see _positiontype_category()). Each row
-    carries "_triggered_columns", the sorted list of mismatch columns that
-    were True for it, for traceability.
+    grouped: {mismatchtype: {group_key: [rows]}}, one entry per distinct
+    issue, each row appearing exactly once even if it tripped multiple
+    columns. group_key means different things by mismatchtype:
+
+    - "new_post" / "missing_position_post": group_key is a position-type
+      category, "BUY/SELL" or "Other" (see _positiontype_category()) --
+      these are structural facts about a position, not a per-column
+      data-quality issue, so every column they trip is pooled together.
+    - anything else (usually "mismatch"): group_key is the "primary" column
+      for that row -- usually just the one column that tripped, but when
+      several trip together for the same row (e.g. a quantity difference
+      also moving a derived column, or a row-count change also moving every
+      aggregated column) they're pooled under one driving column instead of
+      reported as separate issues (see MISMATCH_PRIMARY_COLUMN_PRIORITY).
+
+    Every row in "grouped" carries "_triggered_columns" (every column it
+    tripped) and "_differences" ({column: post-pre}, for whichever triggered
+    columns have a resolvable pre/post pair), for traceability.
     """
     mismatch_cols = find_mismatch_columns(tables)
     result: dict[str, dict] = {
-        col: {"pre_col": None, "post_col": None, "true_rows": [], "true_groups": {},
-              "false_rows": [], "unclassified": 0}
+        col: {"pre_col": None, "post_col": None, "true_rows": [], "false_rows": [], "unclassified": 0}
         for col in mismatch_cols
     }
-    structural: dict[str, dict[str, dict[tuple, dict]]] = {}
+    pooled: dict[tuple, dict] = {}
 
     for t in tables:
         df, source_file, sheet_name = t["df"], t["source_file"], t["sheet_name"]
@@ -235,22 +263,30 @@ def compute_triage(tables: list[dict]) -> tuple[dict[str, dict], dict[str, dict]
                     row[mismatchtype_col] if mismatchtype_col else None
                 )
 
-                if verdict is True and mismatchtype in STRUCTURAL_MISMATCHTYPES:
+                difference = None
+                if pre_col and post_col:
+                    try:
+                        difference = float(row[post_col]) - float(row[pre_col])
+                    except (TypeError, ValueError):
+                        difference = None
+
+                if verdict is True:
                     row_key = (source_file, sheet_name, idx)
-                    category = _positiontype_category(row, positiontype_col)
-                    bucket = structural.setdefault(mismatchtype, {}).setdefault(category, {})
-                    if row_key in bucket:
-                        bucket[row_key]["_triggered_columns"].append(col)
+                    if row_key in pooled:
+                        record = pooled[row_key]
+                        record["_triggered_columns"].append(col)
+                        record["_differences"][col] = difference
                     else:
                         record = row.to_dict()
                         record["_source_file"] = source_file
                         record["_sheet_name"] = sheet_name
                         record["_process_type"] = process_type
                         record["_mismatchtype"] = mismatchtype
-                        record["_category"] = category
+                        record["_positiontype_category"] = _positiontype_category(row, positiontype_col)
                         record["_triggered_columns"] = [col]
-                        bucket[row_key] = record
-                    result[col]["true_rows"].append(bucket[row_key])
+                        record["_differences"] = {col: difference}
+                        pooled[row_key] = record
+                    result[col]["true_rows"].append(pooled[row_key])
                     continue
 
                 record = row.to_dict()
@@ -258,27 +294,22 @@ def compute_triage(tables: list[dict]) -> tuple[dict[str, dict], dict[str, dict]
                 record["_sheet_name"] = sheet_name
                 record["_process_type"] = process_type
                 record["_mismatchtype"] = mismatchtype
-                if pre_col and post_col:
-                    try:
-                        pre_v = float(row[pre_col])
-                        post_v = float(row[post_col])
-                        record["_difference"] = post_v - pre_v
-                    except (TypeError, ValueError):
-                        record["_difference"] = None
-                if verdict is True:
-                    result[col]["true_rows"].append(record)
-                    result[col]["true_groups"].setdefault(mismatchtype, []).append(record)
-                elif verdict is False:
+                record["_difference"] = difference
+                if verdict is False:
                     result[col]["false_rows"].append(record)
                 else:
                     result[col]["unclassified"] += 1
 
-    structural_final = {
-        mismatchtype: {category: list(rows.values()) for category, rows in categories.items()}
-        for mismatchtype, categories in structural.items()
-    }
+    grouped: dict[str, dict[str, list[dict]]] = {}
+    for record in pooled.values():
+        mismatchtype = record["_mismatchtype"]
+        if mismatchtype in STRUCTURAL_MISMATCHTYPES:
+            group_key = record["_positiontype_category"]
+        else:
+            group_key = _primary_column(record["_triggered_columns"])
+        grouped.setdefault(mismatchtype, {}).setdefault(group_key, []).append(record)
 
-    return result, structural_final
+    return result, grouped
 
 
 def ordered_mismatchtypes(true_groups: dict[str, list]) -> list[str]:
@@ -291,8 +322,16 @@ def ordered_mismatchtypes(true_groups: dict[str, list]) -> list[str]:
     return ordered
 
 
-def _diff_shape(rows: list[dict]) -> dict:
-    diffs = [r["_difference"] for r in rows if r.get("_difference") is not None]
+def _diff_shape(rows: list[dict], column: str | None = None) -> dict:
+    """Shape (min/max/mean/constant-offset) of the pre/post differences for
+    these rows. column: for grouped/pooled rows (which carry a
+    "_differences" dict keyed by every column they triggered), which
+    column's differences to summarize; omit for plain per-column FALSE/
+    unclassified rows, which carry a single scalar "_difference" instead."""
+    if column is not None:
+        diffs = [r["_differences"].get(column) for r in rows if r.get("_differences", {}).get(column) is not None]
+    else:
+        diffs = [r["_difference"] for r in rows if r.get("_difference") is not None]
     if not diffs:
         return {}
     constant = len({round(d, 6) for d in diffs}) == 1
@@ -306,7 +345,7 @@ def _diff_shape(rows: list[dict]) -> dict:
 
 
 def build_data_digest(
-    tables: list[dict], triage: dict[str, dict], structural: dict[str, dict],
+    tables: list[dict], triage: dict[str, dict], grouped: dict[str, dict],
     max_sample_rows: int,
 ) -> dict:
     """A compact, token-budget-aware summary of the ingested data + the
@@ -314,11 +353,16 @@ def build_data_digest(
     prompt. Every number in here is exact (computed over the full dataset);
     only the row-level samples are capped.
 
-    "issues" covers per-column, non-structural (mostly "mismatch") issues.
+    "issues" covers non-structural (usually "mismatch") issues, one entry
+    per (mismatchtype, primary column) -- see compute_triage(). "column" is
+    that primary column; "triggered_columns" lists every column (including
+    the primary one) that tripped together on these rows, when more than
+    one moved together for the same underlying reason.
+
     "structural_issues" covers the pooled/deduped "new_post" and
     "missing_position_post" issues, one entry per (mismatchtype, category)
-    -- see compute_triage() -- each listing every mismatch column it
-    triggered, since a single structural row can trip several at once.
+    -- each listing every mismatch column it triggered, since a single
+    structural row can trip several at once.
     """
     files = sorted({t["source_file"] for t in tables})
     process_types_by_file = {t["source_file"]: t.get("process_type", "Unknown") for t in tables}
@@ -328,39 +372,38 @@ def build_data_digest(
               for t in tables]
 
     issues = []
-    for col, data in triage.items():
-        true_n, false_n = len(data["true_rows"]), len(data["false_rows"])
-        for mt in ordered_mismatchtypes(data["true_groups"]):
-            rows = data["true_groups"][mt]
-            process_types = sorted({r.get("_process_type", "Unknown") for r in rows})
-            issues.append({
-                "column": col,
-                "mismatchtype": mt,
-                "pre_column": data["pre_col"],
-                "post_column": data["post_col"],
-                "count": len(rows),
-                "column_true_total": true_n,
-                "column_false_total": false_n,
-                "process_types": process_types,
-                "difference_shape": _diff_shape(rows),
-                "sample_rows": rows[:max_sample_rows],
-            })
-
     structural_issues = []
-    for mismatchtype in sorted(structural.keys()):
-        categories = structural[mismatchtype]
-        for category in sorted(categories.keys()):
-            rows = categories[category]
+    for mismatchtype in ordered_mismatchtypes(grouped):
+        groups = grouped[mismatchtype]
+        is_structural = mismatchtype in STRUCTURAL_MISMATCHTYPES
+        for group_key in sorted(groups.keys()):
+            rows = groups[group_key]
             triggered_columns = sorted({c for r in rows for c in r.get("_triggered_columns", [])})
             process_types = sorted({r.get("_process_type", "Unknown") for r in rows})
-            structural_issues.append({
-                "mismatchtype": mismatchtype,
-                "category": category,
-                "count": len(rows),
-                "triggered_columns": triggered_columns,
-                "process_types": process_types,
-                "sample_rows": rows[:max_sample_rows],
-            })
+            if is_structural:
+                structural_issues.append({
+                    "mismatchtype": mismatchtype,
+                    "category": group_key,
+                    "count": len(rows),
+                    "triggered_columns": triggered_columns,
+                    "process_types": process_types,
+                    "sample_rows": rows[:max_sample_rows],
+                })
+            else:
+                data = triage.get(group_key, {})
+                issues.append({
+                    "column": group_key,
+                    "mismatchtype": mismatchtype,
+                    "triggered_columns": triggered_columns,
+                    "pre_column": data.get("pre_col"),
+                    "post_column": data.get("post_col"),
+                    "count": len(rows),
+                    "column_true_total": len(data.get("true_rows", [])),
+                    "column_false_total": len(data.get("false_rows", [])),
+                    "process_types": process_types,
+                    "difference_shape": _diff_shape(rows, column=group_key),
+                    "sample_rows": rows[:max_sample_rows],
+                })
 
     return {
         "files": files,

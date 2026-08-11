@@ -80,15 +80,26 @@ rowcountsum_mismatch, and so on) is flagged:
 
 Grouping rule -- read carefully, it differs by mismatchtype:
 
-- "mismatch" (and "other"): stays one issue per (column, mismatchtype), as
-  before. Treat every (column, mismatchtype) combination you're given as
-  its own distinct issue -- do not merge a "qty_mismatch / mismatch" issue
-  with a "rowcountsum_mismatch / mismatch" issue into one description or
-  root cause just because the same underlying trade drove both; each
-  column is still its own issue since it represents a distinct check. The
-  digest's "issues" list is already split this way; your triage_categories
-  and root_causes entries for these should set "column" and "mismatchtype"
-  to match, one issue per combination.
+- "mismatch" (and "other"): a single position can trip several "*_mismatch"
+  columns at once for ONE underlying reason -- e.g. a quantity difference
+  also moves a column derived from quantity, or a row-count change (source-
+  side split/merge of detail rows) shifts every column that aggregates
+  across rows, even though the position's own quantity didn't change. When
+  that happens, Python has already pooled those columns into ONE issue and
+  picked the column actually worth investigating as "column" (the "driving"
+  column -- typically qty_mismatch or rowcountsum_mismatch when either is
+  involved), with the rest listed under "triggered_columns" for
+  traceability. Do NOT re-split a pooled issue back out into one entry per
+  triggered column, and do NOT report on a column that only appears inside
+  another issue's "triggered_columns" as if it were its own separate issue
+  -- e.g. if "qty_mismatch" is the issue's "column" and
+  "pricequantitysum_mismatch" appears in its "triggered_columns", there is
+  no separate pricequantitysum_mismatch issue to investigate; it's the same
+  break, already explained by the quantity difference. The digest's
+  "issues" list is already split this way (one entry per (mismatchtype,
+  column) after pooling) -- mirror it exactly, one triage_categories entry
+  and at most one root_causes entry per issue, setting "column" to the
+  digest's "column" value.
 - "new_post" / "missing_position_post": these are structural facts about a
   position, not a per-column data-quality signal -- the same new/dropped
   position trips every "*_mismatch" column on that row at once (one side

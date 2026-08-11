@@ -14,17 +14,18 @@ from openpyxl.utils import get_column_letter
 from core.xlsx_ingest import (
     CATEGORY_BUY_SELL,
     CATEGORY_OTHER,
+    MISMATCH_PRIMARY_COLUMN_PRIORITY,
+    STRUCTURAL_MISMATCHTYPES,
     ordered_mismatchtypes,
 )
 
 FONT_NAME = "Arial"
 HEADER_FONT = Font(name=FONT_NAME, size=11, bold=True, color="FFFFFF")
 HEADER_FILL = PatternFill("solid", fgColor="305496")
-FALSE_FILL = PatternFill("solid", fgColor="E2EFDA")
 GROUP_FILL = PatternFill("solid", fgColor="D9D9D9")
 
-# One fill per mismatchtype so the different "issues" within a column's sheet
-# are visually distinguishable, not just labeled. Unrecognized mismatchtype
+# One fill per mismatchtype so the different issue groups within a sheet are
+# visually distinguishable, not just labeled. Unrecognized mismatchtype
 # values fall back to the "mismatch" fill.
 MISMATCHTYPE_FILLS = {
     "mismatch": PatternFill("solid", fgColor="FCE4E4"),           # red-ish: genuine value diff
@@ -60,13 +61,15 @@ def _autosize(ws, widths: list[int]):
         ws.column_dimensions[get_column_letter(i)].width = w
 
 
-def build_report(triage: dict[str, dict], structural: dict[str, dict], analysis: dict,
+def build_report(triage: dict[str, dict], grouped: dict[str, dict], analysis: dict,
                   sources: list[str], output_path: str,
                   process_types_by_file: dict[str, str] | None = None):
     """triage: the FULL, uncapped per-column output of xlsx_ingest.compute_triage
     (every row, not the token-budget-limited sample that was sent to Claude).
-    structural: the FULL, uncapped {mismatchtype: {category: [rows]}} output of
-    compute_triage -- the pooled/deduped "new_post"/"missing_position_post" rows.
+    grouped: the FULL, uncapped {mismatchtype: {group_key: [rows]}} output of
+    compute_triage -- every flagged row pooled/deduped across the columns it
+    triggered, one entry per distinct issue (see compute_triage's docstring
+    for what group_key means per mismatchtype).
     analysis: the parsed tool-call dict from claude_client.run_analysis (the
     'result' key: summary/triage_categories/root_causes/recommendations).
     sources: list of original uploaded file names included in this report.
@@ -78,43 +81,34 @@ def build_report(triage: dict[str, dict], structural: dict[str, dict], analysis:
 
     # A column with zero TRUE rows reconciled cleanly (e.g. exposureqty_mismatch,
     # expprice_mismatch on a run where those never differ) -- no issue to
-    # report, so skip its detail sheet and its Summary row entirely rather
-    # than padding the workbook with tabs that only ever show "No issue".
-    # "true_groups" (not "true_rows") drives this: it already excludes the
-    # structural new_post/missing_position_post rows, which get their own
-    # pooled sheets below instead of a per-column one.
-    flagged = {col: issue for col, issue in triage.items() if issue["true_groups"]}
+    # report, so it's left out of the "clean" count message below rather than
+    # padding the workbook with tabs that only ever show "No issue".
     clean_column_count = sum(1 for issue in triage.values() if not issue["true_rows"])
 
-    _build_summary_sheet(wb, triage, structural, analysis, sources,
-                          process_types_by_file or {}, clean_column_count)
+    _build_summary_sheet(wb, grouped, analysis, sources, process_types_by_file or {}, clean_column_count)
     _build_root_cause_sheet(wb, analysis)
-    for col, issue in flagged.items():
-        _build_issue_sheet(wb, col, issue)
-    for mismatchtype in _ordered_structural_types(structural):
-        _build_structural_sheet(wb, mismatchtype, structural[mismatchtype])
+    for mismatchtype in ordered_mismatchtypes(grouped):
+        _build_mismatchtype_sheet(wb, mismatchtype, grouped[mismatchtype])
 
     wb.save(output_path)
 
 
-def _ordered_structural_types(structural: dict[str, dict]) -> list[str]:
-    """new_post, then missing_position_post, then anything else -- only the
-    ones actually present in this run's data."""
-    present = set(structural.keys())
-    ordered = [mt for mt in ("new_post", "missing_position_post") if mt in present]
+def _ordered_group_keys(mismatchtype: str, groups: dict[str, list]) -> list[str]:
+    """For structural mismatchtypes, group_key is a position-type category:
+    BUY/SELL first, then Other, then anything else found. For everything
+    else (usually "mismatch"), group_key is a column name: the configured
+    "primary driver" columns first (see MISMATCH_PRIMARY_COLUMN_PRIORITY),
+    then the rest alphabetically."""
+    present = set(groups.keys())
+    if mismatchtype in STRUCTURAL_MISMATCHTYPES:
+        ordered = [c for c in (CATEGORY_BUY_SELL, CATEGORY_OTHER) if c in present]
+    else:
+        ordered = [c for c in MISMATCH_PRIMARY_COLUMN_PRIORITY if c in present]
     ordered += sorted(present - set(ordered))
     return ordered
 
 
-def _ordered_categories(categories: dict[str, list]) -> list[str]:
-    """BUY/SELL first, then Other, then any other category value found."""
-    present = set(categories.keys())
-    ordered = [c for c in (CATEGORY_BUY_SELL, CATEGORY_OTHER) if c in present]
-    ordered += sorted(present - set(ordered))
-    return ordered
-
-
-def _build_summary_sheet(wb, triage, structural, analysis, sources, process_types_by_file, clean_column_count=0):
+def _build_summary_sheet(wb, grouped, analysis, sources, process_types_by_file, clean_column_count=0):
     ws = wb.create_sheet("Summary")
     ws.sheet_view.showGridLines = False
 
@@ -147,8 +141,7 @@ def _build_summary_sheet(wb, triage, structural, analysis, sources, process_type
     cell.alignment = WRAP
     r = summary_end + 1
 
-    issue_count = sum(len(issue["true_groups"]) for issue in triage.values())
-    issue_count += sum(len(categories) for categories in structural.values())
+    issue_count = sum(len(groups) for groups in grouped.values())
     bug_report = analysis.get("bug_report") or {}
     if issue_count > 1 and (bug_report.get("synopsis") or bug_report.get("description")):
         r += 1
@@ -196,44 +189,32 @@ def _build_summary_sheet(wb, triage, structural, analysis, sources, process_type
         if c.get("category") and not c.get("column")
     }
 
-    # Column-specific issues (mostly "mismatch") stay one row per (column,
-    # mismatchtype). Rows with no issue at all ("No issue" / all-False) are
-    # not reconciliation breaks and are left out of this table entirely.
+    # One row per distinct issue -- one per (mismatchtype, group_key), see
+    # compute_triage(). A row that tripped several mismatch columns together
+    # for the same underlying reason (e.g. a quantity difference also moving
+    # a derived column, or a row-count change moving every aggregated
+    # column) is one issue here, not one per column; "Issue (column(s))"
+    # lists every column it triggered. Rows with no issue at all ("No
+    # issue" / all-False) are not reconciliation breaks and are left out of
+    # this table entirely.
     r = header_row + 1
-    for col, issue in triage.items():
-        for mt in ordered_mismatchtypes(issue["true_groups"]):
-            rows = issue["true_groups"][mt]
-            cat = cat_by_key.get((col, mt), {})
-            process_types = sorted({row.get("_process_type", "Unknown") for row in rows})
-            row_vals = [
-                col,
-                MISMATCHTYPE_LABELS.get(mt, mt),
-                "-",
-                len(rows),
-                ", ".join(process_types),
-                cat.get("description", ""),
-            ]
-            for j, v in enumerate(row_vals, start=1):
-                c = ws.cell(row=r, column=j, value=v)
-                c.font = BODY_FONT
-                c.border = BORDER
-                c.alignment = WRAP
-            r += 1
-
-    # Structural issues (new_post / missing_position_post) are pooled across
-    # every column they triggered and shown once per (mismatchtype,
-    # category) instead of once per column -- see xlsx_ingest.compute_triage.
-    for mt in _ordered_structural_types(structural):
-        categories = structural[mt]
-        for category in _ordered_categories(categories):
-            rows = categories[category]
+    for mismatchtype in ordered_mismatchtypes(grouped):
+        is_structural = mismatchtype in STRUCTURAL_MISMATCHTYPES
+        groups = grouped[mismatchtype]
+        for group_key in _ordered_group_keys(mismatchtype, groups):
+            rows = groups[group_key]
             triggered_columns = sorted({c for row in rows for c in row.get("_triggered_columns", [])})
-            cat = struct_cat_by_key.get((mt, category), {})
             process_types = sorted({row.get("_process_type", "Unknown") for row in rows})
+            if is_structural:
+                cat = struct_cat_by_key.get((mismatchtype, group_key), {})
+                category_display = group_key
+            else:
+                cat = cat_by_key.get((group_key, mismatchtype), {})
+                category_display = "-"
             row_vals = [
                 ", ".join(triggered_columns),
-                MISMATCHTYPE_LABELS.get(mt, mt),
-                category,
+                MISMATCHTYPE_LABELS.get(mismatchtype, mismatchtype),
+                category_display,
                 len(rows),
                 ", ".join(process_types),
                 cat.get("description", ""),
@@ -296,89 +277,15 @@ def _build_root_cause_sheet(wb, analysis):
     _autosize(ws, [28, 16, 22, 12, 16, 45, 40, 22, 12])
 
 
-def _build_issue_sheet(wb, col: str, issue: dict):
-    sheet_name = col[:31] if len(col) <= 31 else col[:28] + "..."
-    ws = wb.create_sheet(sheet_name)
-    ws.sheet_view.showGridLines = False
-    ws.freeze_panes = "A4"
-
-    pre_col, post_col = issue["pre_col"], issue["post_col"]
-
-    ws["A1"] = f"Triage: {col}"
-    ws["A1"].font = TITLE_FONT
-    ws["A2"] = "Rows grouped by mismatch type (each is a distinct issue), then FALSE (no issue)."
-    ws["A2"].font = SUBTITLE_FONT
-
-    true_rows = issue["true_rows"]
-    false_rows = issue["false_rows"]
-    mismatchtypes = ordered_mismatchtypes(issue["true_groups"])
-
-    id_cols: list[str] = []
-    seen = set()
-    for row in (true_rows + false_rows):
-        for k in row.keys():
-            if k in (col, pre_col, post_col, "_source_file", "_sheet_name", "_process_type",
-                      "_mismatchtype", "_category", "_triggered_columns", "_difference"):
-                continue
-            if k.startswith("pre_") or k.startswith("post_") or k.lower().endswith("_mismatch"):
-                continue
-            if k not in seen:
-                seen.add(k)
-                id_cols.append(k)
-
-    headers = ["source_file", "sheet_name", "process_type"] + id_cols
-    if pre_col:
-        headers += [pre_col, post_col, "difference (post - pre)"]
-    headers += [col]
-
-    header_row = 4
-    for j, h in enumerate(headers, start=1):
-        ws.cell(row=header_row, column=j, value=h)
-    _style_header_row(ws, header_row, len(headers))
-
-    r = header_row + 1
-    groups = [(issue["true_groups"][mt], MISMATCHTYPE_FILLS.get(mt, DEFAULT_MISMATCHTYPE_FILL),
-               f"ISSUE - {MISMATCHTYPE_LABELS.get(mt, mt)}") for mt in mismatchtypes]
-    groups.append((false_rows, FALSE_FILL, "FALSE - no issue"))
-
-    for group_rows, fill, label in groups:
-        if not group_rows:
-            continue
-        ws.cell(row=r, column=1, value=f"{label}  ({len(group_rows)} rows)").font = BOLD_BODY_FONT
-        ws.merge_cells(start_row=r, start_column=1, end_row=r, end_column=len(headers))
-        ws.cell(row=r, column=1).fill = GROUP_FILL
-        r += 1
-        for row in group_rows:
-            values = [row.get("_source_file", ""), row.get("_sheet_name", ""), row.get("_process_type", "Unknown")]
-            values += [row.get(k, "") for k in id_cols]
-            pre_idx = post_idx = diff_idx = None
-            if pre_col:
-                pre_idx = len(values) + 1
-                post_idx = pre_idx + 1
-                diff_idx = post_idx + 1
-                values += [row.get(pre_col), row.get(post_col), None]
-            values += [row.get(col)]
-            for j, v in enumerate(values, start=1):
-                c = ws.cell(row=r, column=j, value=v)
-                c.font = BODY_FONT
-                c.border = BORDER
-                c.fill = fill
-            if pre_col:
-                c = ws.cell(row=r, column=diff_idx,
-                             value=f"={get_column_letter(post_idx)}{r}-{get_column_letter(pre_idx)}{r}")
-                c.font = BODY_FONT
-                c.border = BORDER
-                c.fill = fill
-                c.number_format = "0.0000"
-            r += 1
-
-    _autosize(ws, [16, 14, 14] + [14] * len(id_cols) + ([16, 16, 16] if pre_col else []) + [10])
-
-
-def _build_structural_sheet(wb, mismatchtype: str, categories: dict[str, list]):
-    """One sheet per structural mismatchtype (new_post / missing_position_post),
-    with rows grouped by position-type category (BUY/SELL vs Other) instead of
-    duplicated once per mismatch column -- see xlsx_ingest.compute_triage."""
+def _build_mismatchtype_sheet(wb, mismatchtype: str, groups: dict[str, list]):
+    """One sheet per mismatchtype ("Mismatch", "New position (post only)",
+    "Missing position (post)", ...), with rows grouped by issue -- a
+    position-type category for structural mismatchtypes, the primary
+    driving column for everything else -- instead of one tab per literal
+    mismatch column. A row that triggered several columns for the same
+    underlying reason appears once, under its group, with every triggered
+    column listed (see compute_triage())."""
+    is_structural = mismatchtype in STRUCTURAL_MISMATCHTYPES
     label = MISMATCHTYPE_LABELS.get(mismatchtype, mismatchtype)
     ws = wb.create_sheet(label[:31])
     ws.sheet_view.showGridLines = False
@@ -387,16 +294,18 @@ def _build_structural_sheet(wb, mismatchtype: str, categories: dict[str, list]):
     ws["A1"] = f"Triage: {label}"
     ws["A1"].font = TITLE_FONT
     ws["A2"] = ("Each position appears once, pooled across every mismatch column it "
-                "triggered, grouped by position type.")
+                "triggered, grouped by position type." if is_structural else
+                "Each position appears once, pooled across every mismatch column that "
+                "moved together for the same reason, grouped by the driving column.")
     ws["A2"].font = SUBTITLE_FONT
 
-    all_rows = [row for rows in categories.values() for row in rows]
+    all_rows = [row for rows in groups.values() for row in rows]
     id_cols: list[str] = []
     seen = set()
     for row in all_rows:
         for k in row.keys():
             if k in ("_source_file", "_sheet_name", "_process_type", "_mismatchtype",
-                      "_category", "_triggered_columns", "_difference"):
+                      "_positiontype_category", "_triggered_columns", "_differences", "_difference"):
                 continue
             if k.lower().endswith("_mismatch"):
                 continue
@@ -404,7 +313,9 @@ def _build_structural_sheet(wb, mismatchtype: str, categories: dict[str, list]):
                 seen.add(k)
                 id_cols.append(k)
 
-    headers = ["source_file", "sheet_name", "process_type", "triggered_columns"] + id_cols
+    diff_cols = sorted({c for row in all_rows for c, v in row.get("_differences", {}).items() if v is not None})
+
+    headers = ["source_file", "sheet_name", "process_type", "triggered_columns"] + id_cols + [f"diff: {c}" for c in diff_cols]
     header_row = 4
     for j, h in enumerate(headers, start=1):
         ws.cell(row=header_row, column=j, value=h)
@@ -412,11 +323,17 @@ def _build_structural_sheet(wb, mismatchtype: str, categories: dict[str, list]):
 
     fill = MISMATCHTYPE_FILLS.get(mismatchtype, DEFAULT_MISMATCHTYPE_FILL)
     r = header_row + 1
-    for category in _ordered_categories(categories):
-        rows = categories[category]
+    for group_key in _ordered_group_keys(mismatchtype, groups):
+        rows = groups[group_key]
         if not rows:
             continue
-        ws.cell(row=r, column=1, value=f"CATEGORY - {category}  ({len(rows)} rows)").font = BOLD_BODY_FONT
+        if is_structural:
+            group_label = f"CATEGORY - {group_key}"
+        else:
+            triggered_union = sorted({c for row in rows for c in row.get("_triggered_columns", [])})
+            others = [c for c in triggered_union if c != group_key]
+            group_label = f"ISSUE - {group_key}" + (f"  (also triggers: {', '.join(others)})" if others else "")
+        ws.cell(row=r, column=1, value=f"{group_label}  ({len(rows)} rows)").font = BOLD_BODY_FONT
         ws.merge_cells(start_row=r, start_column=1, end_row=r, end_column=len(headers))
         ws.cell(row=r, column=1).fill = GROUP_FILL
         r += 1
@@ -428,6 +345,8 @@ def _build_structural_sheet(wb, mismatchtype: str, categories: dict[str, list]):
                 ", ".join(row.get("_triggered_columns", [])),
             ]
             values += [row.get(k, "") for k in id_cols]
+            diffs = row.get("_differences", {})
+            values += [diffs.get(c) for c in diff_cols]
             for j, v in enumerate(values, start=1):
                 c = ws.cell(row=r, column=j, value=v)
                 c.font = BODY_FONT
@@ -435,4 +354,4 @@ def _build_structural_sheet(wb, mismatchtype: str, categories: dict[str, list]):
                 c.fill = fill
             r += 1
 
-    _autosize(ws, [16, 14, 14, 30] + [14] * len(id_cols))
+    _autosize(ws, [16, 14, 14, 30] + [14] * len(id_cols) + [14] * len(diff_cols))
