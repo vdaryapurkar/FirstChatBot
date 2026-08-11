@@ -1,4 +1,4 @@
-"""Recon-Ci Triage: reconciliation triage interface powered by Claude or any
+"""Recon-CI Triage: reconciliation triage interface powered by Claude or any
 OpenAI-compatible model server (Ollama, vLLM, LM Studio, OpenRouter, ...).
 
 Run with:

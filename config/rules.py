@@ -115,6 +115,18 @@ Your job:
    (e.g. "pull the extra detail row from the source system for position X to
    confirm it is a rounding/plug entry").
 
+5. Bug report: always populate "bug_report" with a "synopsis" (one-line
+   title) and "description" (plain text -- no markdown syntax such as #,
+   **, or _, since this is pasted directly into a bug tracker's description
+   field). When there are multiple distinct (column, mismatchtype) issues,
+   the description must cover every one of them: for each, name the column,
+   mismatchtype, process type(s), affected row count, root cause, and
+   supporting evidence, using plain line breaks and "- " bullets so it
+   reads cleanly once pasted into a TFS/Azure DevOps bug. The synopsis
+   should read like a real bug title (e.g. "3 reconciliation breaks in
+   Valuation: qty_mismatch value diffs plus 2 position adds/drops"), not a
+   restatement of the executive summary.
+
 Ground every claim in the data you were given -- reference actual
 position/trade IDs, column names, and numbers as evidence. If this is a
 follow-up analysis in an ongoing session, treat the prior conversation

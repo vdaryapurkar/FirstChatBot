@@ -1,4 +1,4 @@
-# Recon-Ci Triage
+# Recon-CI Triage
 
 A local web interface that uses an LLM -- Claude, or any OpenAI-compatible
 model server (Ollama, vLLM, LM Studio, OpenRouter, Together, Groq, ...) -- to

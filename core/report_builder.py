@@ -69,28 +69,35 @@ def build_report(triage: dict[str, dict], analysis: dict, sources: list[str], ou
     wb = openpyxl.Workbook()
     wb.remove(wb.active)
 
-    _build_summary_sheet(wb, triage, analysis, sources, process_types_by_file or {})
+    # Columns with zero TRUE rows reconciled cleanly (e.g. exposureqty_mismatch,
+    # expprice_mismatch on a run where those never differ) -- no issue to
+    # report, so skip their detail sheet and their Summary row entirely rather
+    # than padding the workbook with tabs that only ever show "No issue".
+    flagged = {col: issue for col, issue in triage.items() if issue["true_rows"]}
+    clean_column_count = len(triage) - len(flagged)
+
+    _build_summary_sheet(wb, flagged, analysis, sources, process_types_by_file or {}, clean_column_count)
     _build_root_cause_sheet(wb, analysis)
-    for col, issue in triage.items():
+    for col, issue in flagged.items():
         _build_issue_sheet(wb, col, issue)
 
     wb.save(output_path)
 
 
-def _build_summary_sheet(wb, triage, analysis, sources, process_types_by_file):
+def _build_summary_sheet(wb, triage, analysis, sources, process_types_by_file, clean_column_count=0):
     ws = wb.create_sheet("Summary")
     ws.sheet_view.showGridLines = False
 
-    ws["A1"] = "Recon-Ci Triage Analysis - Summary"
+    ws["A1"] = "Recon-CI Triage Analysis - Summary"
     ws["A1"].font = TITLE_FONT
     ws["A2"] = f"Generated {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')}  |  Sources: {', '.join(sources)}"
     ws["A2"].font = SUBTITLE_FONT
 
-    src_header_row = 4
-    ws.cell(row=src_header_row, column=1, value="Source file")
-    ws.cell(row=src_header_row, column=2, value="Process type")
-    _style_header_row(ws, src_header_row, 2)
-    r = src_header_row + 1
+    r = 4
+    ws.cell(row=r, column=1, value="Source file")
+    ws.cell(row=r, column=2, value="Process type")
+    _style_header_row(ws, r, 2)
+    r += 1
     for src in sources:
         ws.cell(row=r, column=1, value=src).font = BODY_FONT
         ws.cell(row=r, column=2, value=process_types_by_file.get(src, "Unknown")).font = BODY_FONT
@@ -98,18 +105,53 @@ def _build_summary_sheet(wb, triage, analysis, sources, process_types_by_file):
             ws.cell(row=r, column=j).border = BORDER
         r += 1
 
-    summary_label_row = r + 1
-    ws.cell(row=summary_label_row, column=1, value="Executive Summary").font = BOLD_BODY_FONT
-    summary_start = summary_label_row + 1
+    r += 1
+    ws.cell(row=r, column=1, value="Executive Summary").font = BOLD_BODY_FONT
+    r += 1
+    summary_start = r
     summary_end = summary_start + 4
     ws.merge_cells(start_row=summary_start, start_column=1, end_row=summary_end, end_column=6)
     cell = ws.cell(row=summary_start, column=1)
     cell.value = analysis.get("summary", "")
     cell.font = BODY_FONT
     cell.alignment = WRAP
+    r = summary_end + 1
+
+    issue_count = sum(len(issue["true_groups"]) for issue in triage.values())
+    bug_report = analysis.get("bug_report") or {}
+    if issue_count > 1 and (bug_report.get("synopsis") or bug_report.get("description")):
+        r += 1
+        ws.cell(row=r, column=1,
+                value="Bug Report (copy into TFS to file an investigation ticket)").font = BOLD_BODY_FONT
+        r += 1
+        ws.cell(row=r, column=1, value="Synopsis").font = BOLD_BODY_FONT
+        r += 1
+        ws.merge_cells(start_row=r, start_column=1, end_row=r, end_column=6)
+        c = ws.cell(row=r, column=1, value=bug_report.get("synopsis", ""))
+        c.font = BODY_FONT
+        c.alignment = WRAP
+        r += 1
+        ws.cell(row=r, column=1, value="Description").font = BOLD_BODY_FONT
+        r += 1
+        desc_start = r
+        desc_end = desc_start + 9
+        ws.merge_cells(start_row=desc_start, start_column=1, end_row=desc_end, end_column=6)
+        c = ws.cell(row=desc_start, column=1, value=bug_report.get("description", ""))
+        c.font = BODY_FONT
+        c.alignment = WRAP
+        r = desc_end + 1
+
+    if clean_column_count:
+        r += 1
+        plural = "s" if clean_column_count != 1 else ""
+        ws.cell(row=r, column=1,
+                value=(f"{clean_column_count} other mismatch column{plural} reconciled cleanly "
+                       "(no differences found) and are omitted from this report.")).font = SUBTITLE_FONT
+        ws.merge_cells(start_row=r, start_column=1, end_row=r, end_column=6)
+        r += 1
 
     headers = ["Issue (column)", "Mismatch Type", "Count", "Process Type(s)", "Description"]
-    header_row = summary_end + 2
+    header_row = r + 1
     for j, h in enumerate(headers, start=1):
         ws.cell(row=header_row, column=j, value=h)
     _style_header_row(ws, header_row, len(headers))

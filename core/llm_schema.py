@@ -75,8 +75,35 @@ ANALYSIS_PARAMETERS = {
             },
         },
         "recommendations": {"type": "array", "items": {"type": "string"}},
+        "bug_report": {
+            "type": "object",
+            "description": (
+                "A synopsis and description written for a bug tracker (e.g. TFS/Azure DevOps), "
+                "ready to paste as-is into a new bug's title and description fields to file one "
+                "ticket covering everything found this run. Always populate both fields -- even "
+                "for a single issue -- but they matter most when there are multiple distinct "
+                "(column, mismatchtype) issues to investigate together."
+            ),
+            "properties": {
+                "synopsis": {
+                    "type": "string",
+                    "description": "One-line bug title summarizing the issue(s) found.",
+                },
+                "description": {
+                    "type": "string",
+                    "description": (
+                        "Plain-text bug body covering every issue found this run: for each, name "
+                        "the column, mismatchtype, process type(s), affected row count, root "
+                        "cause, and evidence. Use plain line breaks and '- ' bullets -- no "
+                        "markdown syntax (#, **, _, etc.), since this is pasted directly into a "
+                        "bug tracker's plain/rich-text description field."
+                    ),
+                },
+            },
+            "required": ["synopsis", "description"],
+        },
     },
-    "required": ["summary", "triage_categories", "root_causes", "recommendations"],
+    "required": ["summary", "triage_categories", "root_causes", "recommendations", "bug_report"],
 }
 
 
