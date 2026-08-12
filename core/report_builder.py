@@ -63,7 +63,8 @@ def _autosize(ws, widths: list[int]):
 
 def build_report(triage: dict[str, dict], grouped: dict[str, dict], analysis: dict,
                   sources: list[str], output_path: str,
-                  process_types_by_file: dict[str, str] | None = None):
+                  process_types_by_file: dict[str, str] | None = None,
+                  credit_subtypes_by_file: dict[str, str] | None = None):
     """triage: the FULL, uncapped per-column output of xlsx_ingest.compute_triage
     (every row, not the token-budget-limited sample that was sent to Claude).
     grouped: the FULL, uncapped {mismatchtype: {group_key: [rows]}} output of
@@ -75,6 +76,9 @@ def build_report(triage: dict[str, dict], grouped: dict[str, dict], analysis: di
     sources: list of original uploaded file names included in this report.
     process_types_by_file: {source_file: "Valuation"|"Settlement"|"NetValuation"|"Credit"|"Unknown"},
     from xlsx_ingest.build_data_digest()'s "process_types_by_file".
+    credit_subtypes_by_file: {source_file: "CreditExposure"|"CreditExposureInterface"|
+    "CreditForwardAnalysis"|"CreditForwardModel"}, from build_data_digest()'s
+    "credit_subtypes_by_file" -- drives the RVA sheet (skipped entirely if empty).
     """
     wb = openpyxl.Workbook()
     wb.remove(wb.active)
@@ -86,9 +90,10 @@ def build_report(triage: dict[str, dict], grouped: dict[str, dict], analysis: di
     clean_column_count = sum(1 for issue in triage.values() if not issue["true_rows"])
 
     _build_summary_sheet(wb, grouped, analysis, sources, process_types_by_file or {}, clean_column_count)
-    _build_root_cause_sheet(wb, analysis)
+    _build_root_cause_sheet(wb, analysis, grouped)
     for mismatchtype in ordered_mismatchtypes(grouped):
         _build_mismatchtype_sheet(wb, mismatchtype, grouped[mismatchtype])
+    _build_rva_sheet(wb, grouped, credit_subtypes_by_file or {}, analysis)
 
     wb.save(output_path)
 
@@ -177,83 +182,49 @@ def _build_summary_sheet(wb, grouped, analysis, sources, process_types_by_file, 
         ws.merge_cells(start_row=r, start_column=1, end_row=r, end_column=6)
         r += 1
 
-    headers = ["Issue (column(s))", "Mismatch Type", "Category", "Count", "Process Type(s)", "Description"]
-    header_row = r + 1
-    for j, h in enumerate(headers, start=1):
-        ws.cell(row=header_row, column=j, value=h)
-    _style_header_row(ws, header_row, len(headers))
-
-    cat_by_key = {
-        (c.get("column"), c.get("mismatchtype")): c for c in analysis.get("triage_categories", [])
-        if c.get("column")
-    }
-    struct_cat_by_key = {
-        (c.get("mismatchtype"), c.get("category")): c for c in analysis.get("triage_categories", [])
-        if c.get("category") and not c.get("column")
-    }
-
-    # One row per distinct issue -- one per (mismatchtype, group_key), see
-    # compute_triage(). A row that tripped several mismatch columns together
-    # for the same underlying reason (e.g. a quantity difference also moving
-    # a derived column, or a row-count change moving every aggregated
-    # column) is one issue here, not one per column; "Issue (column(s))"
-    # lists every column it triggered. Rows with no issue at all ("No
-    # issue" / all-False) are not reconciliation breaks and are left out of
-    # this table entirely.
-    r = header_row + 1
-    for mismatchtype in ordered_mismatchtypes(grouped):
-        is_structural = mismatchtype in STRUCTURAL_MISMATCHTYPES
-        groups = grouped[mismatchtype]
-        for group_key in _ordered_group_keys(mismatchtype, groups):
-            rows = groups[group_key]
-            triggered_columns = sorted({c for row in rows for c in row.get("_triggered_columns", [])})
-            process_types = sorted({row.get("_process_type", "Unknown") for row in rows})
-            if is_structural:
-                cat = struct_cat_by_key.get((mismatchtype, group_key), {})
-                category_display = group_key
-            else:
-                cat = cat_by_key.get((group_key, mismatchtype), {})
-                category_display = "-"
-            row_vals = [
-                ", ".join(triggered_columns),
-                MISMATCHTYPE_LABELS.get(mismatchtype, mismatchtype),
-                category_display,
-                len(rows),
-                ", ".join(process_types),
-                cat.get("description", ""),
-            ]
-            for j, v in enumerate(row_vals, start=1):
-                c = ws.cell(row=r, column=j, value=v)
-                c.font = BODY_FONT
-                c.border = BORDER
-                c.alignment = WRAP
-            r += 1
-
     _autosize(ws, [24, 26, 12, 10, 24, 60])
     ws.row_dimensions[1].height = 22
 
 
-def _build_root_cause_sheet(wb, analysis):
+def _count_lookup(grouped: dict[str, dict]) -> dict[tuple, int]:
+    """{(mismatchtype, group_key): row count} across every issue -- used to
+    add a Count column to sheets driven by the LLM's analysis (which doesn't
+    itself carry a row count) without duplicating the full issue table the
+    Summary sheet used to show (now dropped in favor of Root Cause Analysis,
+    which already lists every issue)."""
+    return {
+        (mismatchtype, group_key): len(rows)
+        for mismatchtype, groups in grouped.items()
+        for group_key, rows in groups.items()
+    }
+
+
+def _build_root_cause_sheet(wb, analysis, grouped):
     ws = wb.create_sheet("Root Cause Analysis")
     ws.sheet_view.showGridLines = False
 
     ws["A1"] = "Root Cause Analysis"
     ws["A1"].font = TITLE_FONT
 
-    headers = ["Issue", "Column", "Mismatch Type", "Category", "Process Type", "Explanation", "Evidence", "Affected Scope", "Confidence"]
+    headers = ["Issue", "Column", "Mismatch Type", "Category", "Count", "Process Type", "Explanation", "Evidence", "Affected Scope", "Confidence"]
     header_row = 3
     for j, h in enumerate(headers, start=1):
         ws.cell(row=header_row, column=j, value=h)
     _style_header_row(ws, header_row, len(headers))
 
+    counts = _count_lookup(grouped)
     r = header_row + 1
     for rc in analysis.get("root_causes", []):
         evidence = "\n".join(f"- {e}" for e in rc.get("evidence", []))
+        mismatchtype = rc.get("mismatchtype", "")
+        group_key = rc.get("category") or rc.get("column")
+        count = counts.get((mismatchtype, group_key), "")
         row_vals = [
             rc.get("issue", ""),
             rc.get("column", ""),
-            MISMATCHTYPE_LABELS.get(rc.get("mismatchtype", ""), rc.get("mismatchtype", "")),
+            MISMATCHTYPE_LABELS.get(mismatchtype, mismatchtype),
             rc.get("category", "") or "-",
+            count,
             rc.get("process_type", ""),
             rc.get("explanation", ""),
             evidence,
@@ -273,11 +244,11 @@ def _build_root_cause_sheet(wb, analysis):
     r += 1
     for rec in analysis.get("recommendations", []):
         ws.cell(row=r, column=1, value=f"- {rec}").font = BODY_FONT
-        ws.merge_cells(start_row=r, start_column=1, end_row=r, end_column=9)
+        ws.merge_cells(start_row=r, start_column=1, end_row=r, end_column=10)
         ws.cell(row=r, column=1).alignment = WRAP
         r += 1
 
-    _autosize(ws, [28, 16, 22, 12, 16, 45, 40, 22, 12])
+    _autosize(ws, [28, 16, 22, 12, 10, 16, 45, 40, 22, 12])
 
 
 def _build_mismatchtype_sheet(wb, mismatchtype: str, groups: dict[str, list]):
@@ -358,3 +329,104 @@ def _build_mismatchtype_sheet(wb, mismatchtype: str, groups: dict[str, list]):
             r += 1
 
     _autosize(ws, [16, 14, 14, 30] + [14] * len(id_cols) + [14] * len(diff_cols))
+
+
+# Display order for the RVA sheet's four Credit sub-processes -- see
+# xlsx_ingest.CREDIT_SUBTYPES_ORDERED.
+CREDIT_SUBTYPE_ORDER = ["CreditExposure", "CreditExposureInterface", "CreditForwardAnalysis", "CreditForwardModel"]
+
+
+def _build_rva_sheet(wb, grouped: dict[str, dict], credit_subtypes_by_file: dict[str, str], analysis: dict):
+    """RVA: a rollup consolidating findings across the four Credit
+    sub-process files (creditexposure, creditexposureinterface,
+    creditforwardanalysis, creditforwardmodel -- each its own uploaded file,
+    identified by xlsx_ingest.detect_credit_subtype()). Skipped entirely
+    when no Credit files were uploaded this run. A sub-process with no
+    flagged rows still gets a row here noting it reconciled cleanly, rather
+    than being silently omitted -- so the rollup always accounts for every
+    Credit file that was actually uploaded."""
+    if not credit_subtypes_by_file:
+        return
+
+    ws = wb.create_sheet("RVA")
+    ws.sheet_view.showGridLines = False
+
+    ws["A1"] = "RVA - Credit Reconciliation Rollup"
+    ws["A1"].font = TITLE_FONT
+    ws["A2"] = ("Findings consolidated across the Credit sub-process files: CreditExposure, "
+                "CreditExposureInterface, CreditForwardAnalysis, CreditForwardModel.")
+    ws["A2"].font = SUBTITLE_FONT
+
+    # Every pooled row for a Credit file carries its sub-process on
+    # "_credit_subtype" (see compute_triage()); regroup by that here.
+    by_subtype: dict[str, dict[tuple, list]] = {}
+    for mismatchtype, groups in grouped.items():
+        for group_key, rows in groups.items():
+            for row in rows:
+                subtype = row.get("_credit_subtype")
+                if not subtype:
+                    continue
+                by_subtype.setdefault(subtype, {}).setdefault((mismatchtype, group_key), []).append(row)
+
+    file_by_subtype = {v: k for k, v in credit_subtypes_by_file.items()}
+    present = set(credit_subtypes_by_file.values()) | set(by_subtype.keys())
+    ordered_subtypes = [s for s in CREDIT_SUBTYPE_ORDER if s in present]
+    ordered_subtypes += sorted(present - set(ordered_subtypes))
+
+    cat_by_key = {
+        (c.get("column"), c.get("mismatchtype")): c for c in analysis.get("triage_categories", [])
+        if c.get("column")
+    }
+    struct_cat_by_key = {
+        (c.get("mismatchtype"), c.get("category")): c for c in analysis.get("triage_categories", [])
+        if c.get("category") and not c.get("column")
+    }
+
+    headers = ["Sub-process", "Source file", "Issue (column(s))", "Mismatch Type", "Category", "Count", "Description"]
+    header_row = 4
+    for j, h in enumerate(headers, start=1):
+        ws.cell(row=header_row, column=j, value=h)
+    _style_header_row(ws, header_row, len(headers))
+
+    r = header_row + 1
+    for subtype in ordered_subtypes:
+        source_file = file_by_subtype.get(subtype, "")
+        issues = by_subtype.get(subtype, {})
+        if not issues:
+            row_vals = [subtype, source_file, "-", "-", "-", 0, "No differences observed between pre and post."]
+            for j, v in enumerate(row_vals, start=1):
+                c = ws.cell(row=r, column=j, value=v)
+                c.font = BODY_FONT
+                c.border = BORDER
+                c.alignment = WRAP
+            r += 1
+            continue
+
+        for mismatchtype, group_key in sorted(issues.keys()):
+            rows = issues[(mismatchtype, group_key)]
+            is_structural = mismatchtype in STRUCTURAL_MISMATCHTYPES
+            triggered_columns = sorted({c for row in rows for c in row.get("_triggered_columns", [])})
+            if is_structural:
+                cat = struct_cat_by_key.get((mismatchtype, group_key), {})
+                category_display = group_key
+            else:
+                cat = cat_by_key.get((group_key, mismatchtype), {})
+                category_display = "-"
+            row_vals = [
+                subtype,
+                source_file,
+                ", ".join(triggered_columns),
+                MISMATCHTYPE_LABELS.get(mismatchtype, mismatchtype),
+                category_display,
+                len(rows),
+                cat.get("description", ""),
+            ]
+            for j, v in enumerate(row_vals, start=1):
+                c = ws.cell(row=r, column=j, value=v)
+                c.font = BODY_FONT
+                c.border = BORDER
+                c.alignment = WRAP
+            r += 1
+
+    _autosize(ws, [22, 34, 26, 20, 12, 10, 50])
+    ws.row_dimensions[1].height = 22

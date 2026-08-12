@@ -273,7 +273,8 @@ def analyze(session_id):
 
     sources = sorted({u["original_name"] for u in uploads})
     report_builder.build_report(triage, grouped, result, sources, str(report_path),
-                                 process_types_by_file=digest.get("process_types_by_file"))
+                                 process_types_by_file=digest.get("process_types_by_file"),
+                                 credit_subtypes_by_file=digest.get("credit_subtypes_by_file"))
 
     report_id = db.add_report(session_id, str(report_path), result.get("summary", ""))
 

@@ -70,6 +70,33 @@ SETTLEMENT_COLUMNS = {
 }
 PROCESS_TYPES = ("Settlement", "Valuation", "NetValuation", "Credit")
 
+# The Credit process actually covers four separate reconciliation runs, each
+# uploaded from its own source folder (creditexposure, creditexposureinterface,
+# creditforwardanalysis, creditforwardmodel) but each identifiable purely from
+# its filename -- e.g. "unexplained_result_creditexposureinterface...xlsx" --
+# so this doesn't depend on the upload preserving folder structure. Ordered
+# most-specific-substring-first: "creditexposure" is itself a substring of
+# "creditexposureinterface", so the interface variant must be checked first.
+CREDIT_SUBTYPE_PATTERNS = [
+    ("creditexposureinterface", "CreditExposureInterface"),
+    ("creditexposure", "CreditExposure"),
+    ("creditforwardanalysis", "CreditForwardAnalysis"),
+    ("creditforwardmodel", "CreditForwardModel"),
+]
+CREDIT_SUBTYPES_ORDERED = [
+    "CreditExposure", "CreditExposureInterface", "CreditForwardAnalysis", "CreditForwardModel",
+]
+
+
+def detect_credit_subtype(filename: str) -> str | None:
+    """Which of the four Credit-process files this is, from its filename.
+    Only meaningful when detect_process_type() already returned "Credit"."""
+    name = filename.lower()
+    for pattern, subtype in CREDIT_SUBTYPE_PATTERNS:
+        if pattern in name:
+            return subtype
+    return None
+
 
 def detect_process_type(filename: str, columns: list[str]) -> str:
     """Classify which of the four reconciliation processes a file's data
@@ -102,7 +129,9 @@ def read_workbook(path: str | Path) -> dict[str, pd.DataFrame]:
 
 def ingest_files(file_paths: list[tuple[str, str]]) -> list[dict]:
     """file_paths: list of (original_name, stored_path). Returns a flat list of
-    {source_file, sheet_name, df, process_type} for every sheet in every file."""
+    {source_file, sheet_name, df, process_type, credit_subtype} for every
+    sheet in every file. credit_subtype is None unless process_type is
+    "Credit" -- see detect_credit_subtype()."""
     tables = []
     for original_name, stored_path in file_paths:
         sheets = read_workbook(stored_path)
@@ -111,11 +140,13 @@ def ingest_files(file_paths: list[tuple[str, str]]) -> list[dict]:
                 continue
             df = df.dropna(how="all")
             process_type = detect_process_type(original_name, [str(c) for c in df.columns])
+            credit_subtype = detect_credit_subtype(original_name) if process_type == "Credit" else None
             tables.append({
                 "source_file": original_name,
                 "sheet_name": sheet_name,
                 "df": df,
                 "process_type": process_type,
+                "credit_subtype": credit_subtype,
             })
     return tables
 
@@ -244,6 +275,7 @@ def compute_triage(tables: list[dict]) -> tuple[dict[str, dict], dict[str, dict]
     for t in tables:
         df, source_file, sheet_name = t["df"], t["source_file"], t["sheet_name"]
         process_type = t.get("process_type", "Unknown")
+        credit_subtype = t.get("credit_subtype")
         columns = [str(c) for c in df.columns]
         mismatchtype_col = _find_mismatchtype_column(columns)
         positiontype_col = _find_column_ci(columns, POSITIONTYPE_COLUMN)
@@ -281,6 +313,7 @@ def compute_triage(tables: list[dict]) -> tuple[dict[str, dict], dict[str, dict]
                         record["_source_file"] = source_file
                         record["_sheet_name"] = sheet_name
                         record["_process_type"] = process_type
+                        record["_credit_subtype"] = credit_subtype
                         record["_mismatchtype"] = mismatchtype
                         record["_positiontype_category"] = _positiontype_category(row, positiontype_col)
                         record["_triggered_columns"] = [col]
@@ -366,6 +399,9 @@ def build_data_digest(
     """
     files = sorted({t["source_file"] for t in tables})
     process_types_by_file = {t["source_file"]: t.get("process_type", "Unknown") for t in tables}
+    credit_subtypes_by_file = {
+        t["source_file"]: t["credit_subtype"] for t in tables if t.get("credit_subtype")
+    }
     sheets = [{"source_file": t["source_file"], "sheet_name": t["sheet_name"],
                "process_type": t.get("process_type", "Unknown"),
                "rows": len(t["df"]), "columns": [str(c) for c in t["df"].columns]}
@@ -408,6 +444,7 @@ def build_data_digest(
     return {
         "files": files,
         "process_types_by_file": process_types_by_file,
+        "credit_subtypes_by_file": credit_subtypes_by_file,
         "sheets": sheets,
         "issues": issues,
         "structural_issues": structural_issues,
